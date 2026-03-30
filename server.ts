@@ -1,8 +1,6 @@
 import dotenv from "dotenv";
 import path from "path";
 dotenv.config();
-console.log("CWD:", process.cwd());
-console.log("Checking GEMINI_API_KEY:", process.env.GEMINI_API_KEY ? "Present (Starts with " + process.env.GEMINI_API_KEY.slice(0, 4) + ")" : "MISSING");
 
 import express from "express";
 import { createServer as createViteServer } from "vite";
@@ -15,7 +13,7 @@ import axios from "axios";
 import multer from "multer";
 
 // Configure multer for file uploads
-const upload = multer({ dest: "data/" });
+const upload = multer({ dest: "data/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } });
 
 // Check if local ffmpeg exists and set path
 const localFfmpeg = path.join(process.cwd(), "ffmpeg");

@@ -31,6 +31,11 @@ interface Step {
   icon: React.ReactNode;
 }
 
+type PublishLinks = {
+  youtube?: string;
+  spotify?: string;
+};
+
 export default function App() {
   const [videoSource, setVideoSource] = useState<'drive' | 'local'>('drive');
   const [driveUrl, setDriveUrl] = useState('');
@@ -45,6 +50,7 @@ export default function App() {
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(null);
   const [stepData, setStepData] = useState<Record<number, string>>({});
   const [isApproved, setIsApproved] = useState(false);
+  const [publishLinks, setPublishLinks] = useState<PublishLinks | null>(null);
   const [lastGuest, setLastGuest] = useState('');
   const [selectedPlatform, setSelectedPlatform] = useState<'youtube' | 'spotify'>('youtube');
   const [copiedPlatform, setCopiedPlatform] = useState<null | string>(null);
@@ -67,6 +73,8 @@ export default function App() {
         setSelectedStepIndex(parsed.selectedStepIndex !== undefined ? parsed.selectedStepIndex : null);
         setStepData(parsed.stepData || {});
         setIsApproved(parsed.isApproved || false);
+        setPublishLinks(parsed.publishLinks || null);
+        setSelectedPlatform(parsed.selectedPlatform === 'spotify' ? 'spotify' : 'youtube');
       } catch (e) {
         console.error("Failed to load saved state", e);
       }
@@ -94,8 +102,15 @@ export default function App() {
       host2,
       guest,
       episodeNumber,
+      isStarted,
+      currentStep,
+      selectedStepIndex,
+      stepData,
+      isApproved,
+      publishLinks,
+      selectedPlatform,
     }));
-  }, [videoSource, driveUrl, series, host1, host2, guest, episodeNumber]);
+  }, [videoSource, driveUrl, series, host1, host2, guest, episodeNumber, isStarted, currentStep, selectedStepIndex, stepData, isApproved, publishLinks, selectedPlatform]);
 
   // Sync steps statuses with current progress when restoring or updating
   useEffect(() => {
@@ -174,6 +189,7 @@ export default function App() {
 
   const handleApprove = async () => {
     setIsApproved(true);
+    setPublishLinks(null);
     updateStepStatus(3, 'completed');
     updateStepStatus(4, 'processing');
     
@@ -183,7 +199,16 @@ export default function App() {
       
       if (data.status === 'completed') {
         updateStepStatus(4, 'completed');
-        // Optionally show links
+        const links = (data?.links ?? {}) as PublishLinks;
+        setPublishLinks({
+          youtube: typeof links.youtube === 'string' ? links.youtube : undefined,
+          spotify: typeof links.spotify === 'string' ? links.spotify : undefined,
+        });
+        setStepData(prev => ({
+          ...prev,
+          4: 'Publicatie afgerond.'
+        }));
+        setSelectedStepIndex(4);
       }
     } catch (error) {
       console.error(error);
@@ -211,7 +236,19 @@ export default function App() {
 
   const handleCopy = async (platform: string, text: string) => {
     try {
-      await navigator.clipboard.writeText(text);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'absolute';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
       setCopiedPlatform(platform);
       window.setTimeout(() => setCopiedPlatform(null), 1200);
     } catch {
@@ -585,7 +622,7 @@ export default function App() {
                                 for (let i = 1; i < parts.length; i += 2) {
                                   sections.push({
                                     title: parts[i],
-                                    content: parts[i + 1].replace(/^\s*---\s*$/gm, '').trim()
+                                    content: (parts[i + 1] ?? '').replace(/^\s*---\s*$/gm, '').trim()
                                   });
                                 }
 
@@ -612,6 +649,89 @@ export default function App() {
                           </div>
                         );
                       })()
+                    ) : selectedStepIndex === 4 ? (
+                      <div className="bg-black/30 rounded-xl border border-white/5 overflow-hidden">
+                        <div className="flex items-center justify-between gap-4 p-4 border-b border-white/5">
+                          <div className="flex items-center gap-2">
+                            <div className="px-3 py-2 rounded-lg border border-white/10 bg-white/5 text-white/70 text-xs font-mono uppercase tracking-widest flex items-center gap-2">
+                              <Share2 className="w-4 h-4" /> Links
+                            </div>
+                          </div>
+                          {publishLinks?.youtube || publishLinks?.spotify ? (
+                            <button
+                              type="button"
+                              onClick={() => handleCopy('publish-all', [publishLinks?.youtube, publishLinks?.spotify].filter(Boolean).join('\n'))}
+                              className="px-3 py-2 rounded-lg border border-white/10 bg-white/5 text-white/70 hover:text-white transition-all flex items-center gap-2 text-xs font-mono uppercase tracking-widest"
+                            >
+                              <Copy className="w-4 h-4" />
+                              {copiedPlatform === 'publish-all' ? 'Gekopieerd' : 'Kopieer Alles'}
+                            </button>
+                          ) : null}
+                        </div>
+                        <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
+                          <div className="bg-white/5 border border-white/10 rounded-xl p-4">
+                            <div className="flex items-center justify-between mb-4 pb-4 border-b border-white/5">
+                              <h4 className="font-bold text-lg text-orange-500 flex items-center gap-2"><Youtube className="w-4 h-4" /> YouTube</h4>
+                              {publishLinks?.youtube ? (
+                                <div className="flex items-center gap-2">
+                                  <a
+                                    href={publishLinks.youtube}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/70 hover:text-white transition-all flex items-center gap-2 text-xs font-mono uppercase tracking-widest"
+                                  >
+                                    <ExternalLink className="w-3 h-3" /> Open
+                                  </a>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopy('publish-youtube', publishLinks.youtube ?? '')}
+                                    className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/70 hover:text-white transition-all flex items-center gap-2 text-xs font-mono uppercase tracking-widest"
+                                  >
+                                    <Copy className="w-3 h-3" />
+                                    {copiedPlatform === 'publish-youtube' ? 'Gekopieerd' : 'Kopieer'}
+                                  </button>
+                                </div>
+                              ) : null}
+                            </div>
+                            {publishLinks?.youtube ? (
+                              <div className="text-sm text-gray-300 break-words font-mono">{publishLinks.youtube}</div>
+                            ) : (
+                              <div className="text-sm text-gray-500">Nog geen YouTube-link ontvangen.</div>
+                            )}
+                          </div>
+
+                          <div className="bg-white/5 border border-white/10 rounded-xl p-4">
+                            <div className="flex items-center justify-between mb-4 pb-4 border-b border-white/5">
+                              <h4 className="font-bold text-lg text-green-400 flex items-center gap-2"><Music className="w-4 h-4" /> Spotify</h4>
+                              {publishLinks?.spotify ? (
+                                <div className="flex items-center gap-2">
+                                  <a
+                                    href={publishLinks.spotify}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/70 hover:text-white transition-all flex items-center gap-2 text-xs font-mono uppercase tracking-widest"
+                                  >
+                                    <ExternalLink className="w-3 h-3" /> Open
+                                  </a>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopy('publish-spotify', publishLinks.spotify ?? '')}
+                                    className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/70 hover:text-white transition-all flex items-center gap-2 text-xs font-mono uppercase tracking-widest"
+                                  >
+                                    <Copy className="w-3 h-3" />
+                                    {copiedPlatform === 'publish-spotify' ? 'Gekopieerd' : 'Kopieer'}
+                                  </button>
+                                </div>
+                              ) : null}
+                            </div>
+                            {publishLinks?.spotify ? (
+                              <div className="text-sm text-gray-300 break-words font-mono">{publishLinks.spotify}</div>
+                            ) : (
+                              <div className="text-sm text-gray-500">Nog geen Spotify-link ontvangen.</div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
                     ) : (
                       <div className="prose prose-invert max-w-none prose-orange bg-black/30 rounded-xl p-6 border border-white/5">
                         <ReactMarkdown>{stepData[selectedStepIndex]}</ReactMarkdown>
