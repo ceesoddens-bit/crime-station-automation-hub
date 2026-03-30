@@ -31,6 +31,7 @@ interface Step {
 }
 
 export default function App() {
+  const [videoSource, setVideoSource] = useState<'drive' | 'local'>('drive');
   const [driveUrl, setDriveUrl] = useState('');
   const [localFile, setLocalFile] = useState<File | null>(null);
   const [series, setSeries] = useState('Crime Insight');
@@ -43,6 +44,7 @@ export default function App() {
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(null);
   const [stepData, setStepData] = useState<Record<number, string>>({});
   const [isApproved, setIsApproved] = useState(false);
+  const [lastGuest, setLastGuest] = useState('');
   
   // Load state from localStorage on mount
   useEffect(() => {
@@ -50,6 +52,7 @@ export default function App() {
     if (savedState) {
       try {
         const parsed = JSON.parse(savedState);
+        setVideoSource(parsed.videoSource === 'local' ? 'local' : 'drive');
         setDriveUrl(parsed.driveUrl || '');
         setSeries(parsed.series || 'Crime Insight');
         setHost1(parsed.host1 || '');
@@ -66,6 +69,30 @@ export default function App() {
       }
     }
   }, []);
+
+  useEffect(() => {
+    const savedLastGuest = localStorage.getItem('crime-station-last-guest');
+    if (savedLastGuest) setLastGuest(savedLastGuest);
+  }, []);
+
+  useEffect(() => {
+    if (guest.trim()) {
+      setLastGuest(guest);
+      localStorage.setItem('crime-station-last-guest', guest);
+    }
+  }, [guest]);
+
+  useEffect(() => {
+    localStorage.setItem('crime-station-state', JSON.stringify({
+      videoSource,
+      driveUrl,
+      series,
+      host1,
+      host2,
+      guest,
+      episodeNumber,
+    }));
+  }, [videoSource, driveUrl, series, host1, host2, guest, episodeNumber]);
 
   // Sync steps statuses with current progress when restoring or updating
   useEffect(() => {
@@ -97,15 +124,16 @@ export default function App() {
   ]);
 
   const handleStart = async () => {
-    if (!driveUrl && !localFile) return;
+    if (videoSource === 'drive' && !driveUrl) return;
+    if (videoSource === 'local' && !localFile) return;
     setIsStarted(true);
     updateStepStatus(0, 'processing');
     
     try {
       const formData = new FormData();
-      if (localFile) {
+      if (videoSource === 'local' && localFile) {
         formData.append('videoFile', localFile);
-      } else {
+      } else if (videoSource === 'drive') {
         formData.append('driveUrl', driveUrl);
       }
       formData.append('series', series);
@@ -114,9 +142,7 @@ export default function App() {
       formData.append('guest', guest);
       formData.append('episodeNumber', episodeNumber);
 
-      const response = await axios.post('/api/process', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      });
+      const response = await axios.post('/api/process', formData);
       const data = response.data;
       
       if (data.status === 'waiting_approval') {
@@ -196,17 +222,17 @@ export default function App() {
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Bron Video</label>
                   <div className="flex gap-4">
                     <button 
-                      onClick={() => { setLocalFile(null); setDriveUrl(''); }}
-                      className={cn("text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border transition-all", !localFile ? "bg-orange-600 border-orange-600 text-white" : "border-white/10 text-white/40 hover:text-white")}
+                      onClick={() => { setVideoSource('drive'); }}
+                      className={cn("text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border transition-all", videoSource === 'drive' ? "bg-orange-600 border-orange-600 text-white" : "border-white/10 text-white/40 hover:text-white")}
                     >Google Drive</button>
                     <button 
-                      onClick={() => { setLocalFile(null); setDriveUrl(''); }}
-                      className={cn("text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border transition-all", localFile ? "bg-orange-600 border-orange-600 text-white" : "border-white/10 text-white/40 hover:text-white")}
+                      onClick={() => { setVideoSource('local'); }}
+                      className={cn("text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border transition-all", videoSource === 'local' ? "bg-orange-600 border-orange-600 text-white" : "border-white/10 text-white/40 hover:text-white")}
                     >Lokaal Bestand</button>
                   </div>
                 </div>
                 
-                {!localFile ? (
+                {videoSource === 'drive' ? (
                   <input 
                     type="text" 
                     placeholder="https://drive.google.com/..."
@@ -261,7 +287,16 @@ export default function App() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 1</label>
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 1</label>
+                    <button
+                      type="button"
+                      onClick={() => setHost1('Mick van Wely')}
+                      className="text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border border-white/10 text-white/40 hover:text-white transition-all"
+                    >
+                      ✓ Mick van Wely
+                    </button>
+                  </div>
                   <input 
                     type="text" 
                     placeholder="bijv. Mick van Wely"
@@ -271,7 +306,16 @@ export default function App() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 2</label>
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 2</label>
+                    <button
+                      type="button"
+                      onClick={() => setHost2('Amber Bordewijk')}
+                      className="text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border border-white/10 text-white/40 hover:text-white transition-all"
+                    >
+                      ✓ Amber Bordewijk
+                    </button>
+                  </div>
                   <input 
                     type="text" 
                     placeholder="bijv. Amber Bordewijk"
@@ -281,7 +325,27 @@ export default function App() {
                   />
                 </div>
                 <div className="space-y-2 sm:col-span-2">
-                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Naam Gast</label>
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="text-xs font-mono uppercase tracking-widest opacity-50">Naam Gast</label>
+                    <div className="flex items-center gap-2">
+                      {lastGuest && lastGuest !== guest ? (
+                        <button
+                          type="button"
+                          onClick={() => setGuest(lastGuest)}
+                          className="text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border border-white/10 text-white/40 hover:text-white transition-all"
+                        >
+                          ✓ Laatste gast
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => setGuest('')}
+                        className="text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border border-white/10 text-white/40 hover:text-white transition-all"
+                      >
+                        ✓ Geen gast
+                      </button>
+                    </div>
+                  </div>
                   <input 
                     type="text" 
                     placeholder="Naam van de gast"
@@ -294,7 +358,7 @@ export default function App() {
 
               <button 
                 onClick={handleStart}
-                disabled={!driveUrl && !localFile}
+                disabled={(videoSource === 'drive' && !driveUrl) || (videoSource === 'local' && !localFile)}
                 className="w-full bg-orange-600 hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-5 rounded-lg transition-all flex items-center justify-center gap-3 text-xl uppercase tracking-tighter"
               >
                 Start Verwerking <Play className="w-6 h-6 fill-current" />

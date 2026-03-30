@@ -10,6 +10,7 @@ import { GoogleGenAI } from "@google/genai";
 import { google } from "googleapis";
 import ffmpeg from "fluent-ffmpeg";
 import fs from "fs";
+import net from "net";
 import axios from "axios";
 import multer from "multer";
 
@@ -25,9 +26,32 @@ if (fs.existsSync(localFfmpeg)) {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const HOST = "0.0.0.0";
+  const desiredPort = Number(process.env.PORT ?? 3000);
+  const desiredHmrPort = Number(process.env.VITE_HMR_PORT ?? 24678);
 
   app.use(express.json());
+
+  const findAvailablePort = async (startPort: number, host: string) => {
+    for (let port = startPort; port < startPort + 50; port += 1) {
+      const available = await new Promise<boolean>((resolve) => {
+        const server = net.createServer();
+        server.once("error", (err: any) => {
+          server.close();
+          if (err?.code === "EADDRINUSE") resolve(false);
+          else resolve(false);
+        });
+        server.once("listening", () => {
+          server.close(() => resolve(true));
+        });
+        server.listen(port, host);
+      });
+
+      if (available) return port;
+    }
+
+    throw new Error(`No available port found starting from ${startPort}`);
+  };
 
   // Ensure data directory exists
   const dataDir = path.join(process.cwd(), "data");
@@ -223,22 +247,29 @@ async function startServer() {
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
+    const PORT = await findAvailablePort(desiredPort, HOST);
+    const hmrPort = await findAvailablePort(desiredHmrPort, HOST);
+
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: { port: hmrPort } },
       appType: "spa",
     });
     app.use(vite.middlewares);
+
+    app.listen(PORT, HOST, () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
   } else {
+    const PORT = desiredPort;
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
+    app.listen(PORT, HOST, () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
   }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
 }
 
 startServer();
