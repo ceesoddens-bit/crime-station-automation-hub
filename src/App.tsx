@@ -29,9 +29,9 @@ interface Step {
 export default function App() {
   const [driveUrl, setDriveUrl] = useState('');
   const [series, setSeries] = useState('Crime Insight');
-  const [host, setHost] = useState('');
-  const [guest1, setGuest1] = useState('');
-  const [guest2, setGuest2] = useState('');
+  const [host1, setHost1] = useState('');
+  const [host2, setHost2] = useState('');
+  const [guest, setGuest] = useState('');
   const [episodeNumber, setEpisodeNumber] = useState('');
   const [isStarted, setIsStarted] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
@@ -47,9 +47,9 @@ export default function App() {
         const parsed = JSON.parse(savedState);
         setDriveUrl(parsed.driveUrl || '');
         setSeries(parsed.series || 'Crime Insight');
-        setHost(parsed.host || '');
-        setGuest1(parsed.guest1 || '');
-        setGuest2(parsed.guest2 || '');
+        setHost1(parsed.host1 || '');
+        setHost2(parsed.host2 || '');
+        setGuest(parsed.guest || '');
         setEpisodeNumber(parsed.episodeNumber || '');
         setIsStarted(parsed.isStarted || false);
         setCurrentStep(parsed.currentStep || 0);
@@ -98,7 +98,7 @@ export default function App() {
     
     try {
       const response = await axios.post('/api/process', { 
-        driveUrl, series, host, guest1, guest2, episodeNumber 
+        driveUrl, series, host1, host2, guest, episodeNumber 
       });
       const data = response.data;
       
@@ -206,33 +206,33 @@ export default function App() {
                     className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
                   />
                 </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 1</label>
+                  <input 
+                    type="text" 
+                    placeholder="bijv. Mick van Wely"
+                    value={host1}
+                    onChange={(e) => setHost1(e.target.value)}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 2</label>
+                  <input 
+                    type="text" 
+                    placeholder="bijv. Amber Bordewijk"
+                    value={host2}
+                    onChange={(e) => setHost2(e.target.value)}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
+                  />
+                </div>
                 <div className="space-y-2 sm:col-span-2">
-                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator</label>
+                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Naam Gast</label>
                   <input 
                     type="text" 
-                    placeholder="Mick van Wely"
-                    value={host}
-                    onChange={(e) => setHost(e.target.value)}
-                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Gast 1</label>
-                  <input 
-                    type="text" 
-                    placeholder="Naam gast 1"
-                    value={guest1}
-                    onChange={(e) => setGuest1(e.target.value)}
-                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Gast 2</label>
-                  <input 
-                    type="text" 
-                    placeholder="Naam gast 2"
-                    value={guest2}
-                    onChange={(e) => setGuest2(e.target.value)}
+                    placeholder="Naam van de gast"
+                    value={guest}
+                    onChange={(e) => setGuest(e.target.value)}
                     className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
                   />
                 </div>

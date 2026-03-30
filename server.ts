@@ -33,7 +33,7 @@ async function startServer() {
 
   // API Routes
   app.post("/api/process", async (req, res) => {
-    const { driveUrl, series, host, guest1, guest2, episodeNumber } = req.body;
+    const { driveUrl, series, host1, host2, guest, episodeNumber } = req.body;
     
     // Helper to extract Drive ID
     const extractFileId = (link: string) => {
@@ -157,16 +157,16 @@ async function startServer() {
 
         GEGEVENS:
         Serie: ${series}
-        Presentator: ${host}
-        Gast 1: ${guest1}
-        Gast 2: ${guest2}
+        Presentator 1: ${host1}
+        Presentator 2: ${host2}
+        Gast: ${guest}
         Aflevering Nummer: ${episodeNumber}
         Transcriptie: ${transcription}
 
         INSTRUCTIES:
         1. Titel: Maak een pakkende titel in de stijl: "[Onderwerp] | [Sub-onderwerp] | ${series} #${episodeNumber}"
         2. Intro: Maximaal 3-4 zinnen, eindigend met "Luisteren!!"
-        3. Gebruik de namen van de presentator (${host}) en de gasten (${guest1}, ${guest2}) indien ingevuld in de intro. Beschrijf wie met wie praat over de zaak.
+        3. Gebruik de namen van de presentatoren (${host1} en ${host2}) en de gast (${guest}) indien ingevuld in de intro. Beschrijf de dialoog tussen de presentatoren en hun gast over de zaak.
         5. Genereer één blok voor YouTube en één korter blok voor Spotify in dezelfde stijl.
       `;
       const genResponse = await ai.models.generateContent({
