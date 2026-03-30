@@ -1,0 +1,9 @@
+{
+  "name": "Crime Station Automation Hub",
+  "description": "Autonomous agent for processing, transcribing, and publishing Crime Station video and podcast content.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}

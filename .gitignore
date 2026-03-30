@@ -1,0 +1,17 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# App Data
+data/
+ffmpeg
+*.mp3
+*.mp4
+*.md
+!README.md
+!concept.md.example
