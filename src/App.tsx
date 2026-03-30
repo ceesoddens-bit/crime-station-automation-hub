@@ -29,7 +29,9 @@ interface Step {
 export default function App() {
   const [driveUrl, setDriveUrl] = useState('');
   const [series, setSeries] = useState('Crime Insight');
-  const [guest, setGuest] = useState('');
+  const [host, setHost] = useState('');
+  const [guest1, setGuest1] = useState('');
+  const [guest2, setGuest2] = useState('');
   const [episodeNumber, setEpisodeNumber] = useState('');
   const [isStarted, setIsStarted] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
@@ -45,7 +47,9 @@ export default function App() {
         const parsed = JSON.parse(savedState);
         setDriveUrl(parsed.driveUrl || '');
         setSeries(parsed.series || 'Crime Insight');
-        setGuest(parsed.guest || '');
+        setHost(parsed.host || '');
+        setGuest1(parsed.guest1 || '');
+        setGuest2(parsed.guest2 || '');
         setEpisodeNumber(parsed.episodeNumber || '');
         setIsStarted(parsed.isStarted || false);
         setCurrentStep(parsed.currentStep || 0);
@@ -93,7 +97,9 @@ export default function App() {
     updateStepStatus(0, 'processing');
     
     try {
-      const response = await axios.post('/api/process', { driveUrl, series, guest, episodeNumber });
+      const response = await axios.post('/api/process', { 
+        driveUrl, series, host, guest1, guest2, episodeNumber 
+      });
       const data = response.data;
       
       if (data.status === 'waiting_approval') {
@@ -201,12 +207,32 @@ export default function App() {
                   />
                 </div>
                 <div className="space-y-2 sm:col-span-2">
-                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Gast (Optioneel)</label>
+                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator</label>
                   <input 
                     type="text" 
-                    placeholder="Naam van de gast"
-                    value={guest}
-                    onChange={(e) => setGuest(e.target.value)}
+                    placeholder="Mick van Wely"
+                    value={host}
+                    onChange={(e) => setHost(e.target.value)}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Gast 1</label>
+                  <input 
+                    type="text" 
+                    placeholder="Naam gast 1"
+                    value={guest1}
+                    onChange={(e) => setGuest1(e.target.value)}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Gast 2</label>
+                  <input 
+                    type="text" 
+                    placeholder="Naam gast 2"
+                    value={guest2}
+                    onChange={(e) => setGuest2(e.target.value)}
                     className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
                   />
                 </div>
