@@ -3,14 +3,18 @@ import axios from 'axios';
 import { cn } from './lib/utils';
 import { 
   Play, 
+  RotateCcw, 
   CheckCircle2, 
-  Loader2, 
-  Video, 
-  FileText, 
-  Youtube, 
-  Podcast, 
+  Clock, 
+  AlertCircle, 
   ExternalLink,
-  AlertCircle,
+  ChevronRight,
+  FileText,
+  Youtube,
+  Music,
+  Share2,
+  Video,
+  Loader2,
   Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -28,6 +32,7 @@ interface Step {
 
 export default function App() {
   const [driveUrl, setDriveUrl] = useState('');
+  const [localFile, setLocalFile] = useState<File | null>(null);
   const [series, setSeries] = useState('Crime Insight');
   const [host1, setHost1] = useState('');
   const [host2, setHost2] = useState('');
@@ -92,13 +97,25 @@ export default function App() {
   ]);
 
   const handleStart = async () => {
-    if (!driveUrl) return;
+    if (!driveUrl && !localFile) return;
     setIsStarted(true);
     updateStepStatus(0, 'processing');
     
     try {
-      const response = await axios.post('/api/process', { 
-        driveUrl, series, host1, host2, guest, episodeNumber 
+      const formData = new FormData();
+      if (localFile) {
+        formData.append('videoFile', localFile);
+      } else {
+        formData.append('driveUrl', driveUrl);
+      }
+      formData.append('series', series);
+      formData.append('host1', host1);
+      formData.append('host2', host2);
+      formData.append('guest', guest);
+      formData.append('episodeNumber', episodeNumber);
+
+      const response = await axios.post('/api/process', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
       });
       const data = response.data;
       
@@ -174,15 +191,52 @@ export default function App() {
             className="grid grid-cols-1 md:grid-cols-2 gap-12"
           >
             <div className="space-y-8">
-              <div className="space-y-2">
-                <label className="text-xs font-mono uppercase tracking-widest opacity-50">Google Drive Link</label>
-                <input 
-                  type="text" 
-                  placeholder="https://drive.google.com/..."
-                  value={driveUrl}
-                  onChange={(e) => setDriveUrl(e.target.value)}
-                  className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors text-lg"
-                />
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Bron Video</label>
+                  <div className="flex gap-4">
+                    <button 
+                      onClick={() => { setLocalFile(null); setDriveUrl(''); }}
+                      className={cn("text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border transition-all", !localFile ? "bg-orange-600 border-orange-600 text-white" : "border-white/10 text-white/40 hover:text-white")}
+                    >Google Drive</button>
+                    <button 
+                      onClick={() => { setLocalFile(null); setDriveUrl(''); }}
+                      className={cn("text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border transition-all", localFile ? "bg-orange-600 border-orange-600 text-white" : "border-white/10 text-white/40 hover:text-white")}
+                    >Lokaal Bestand</button>
+                  </div>
+                </div>
+                
+                {!localFile ? (
+                  <input 
+                    type="text" 
+                    placeholder="https://drive.google.com/..."
+                    value={driveUrl}
+                    onChange={(e) => setDriveUrl(e.target.value)}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors text-lg"
+                  />
+                ) : (
+                  <div className="relative group overflow-hidden bg-white/5 border border-white/10 rounded-lg p-4 cursor-pointer hover:border-orange-600 transition-all">
+                    <input 
+                      type="file" 
+                      accept="video/*,audio/*"
+                      onChange={(e) => setLocalFile(e.target.files?.[0] || null)}
+                      className="absolute inset-0 opacity-0 cursor-pointer z-10"
+                    />
+                    <div className="flex items-center gap-4">
+                      <div className="w-10 h-10 bg-orange-600/20 rounded flex items-center justify-center text-orange-600">
+                        <Video className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-bold truncate max-w-[200px]">
+                          {localFile ? localFile.name : "Kies een bestand..."}
+                        </p>
+                        <p className="text-[10px] opacity-40 uppercase tracking-widest">
+                          {localFile ? `${(localFile.size / 1024 / 1024).toFixed(1)} MB` : "Klik of sleep hier"}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
@@ -240,7 +294,7 @@ export default function App() {
 
               <button 
                 onClick={handleStart}
-                disabled={!driveUrl}
+                disabled={!driveUrl && !localFile}
                 className="w-full bg-orange-600 hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-5 rounded-lg transition-all flex items-center justify-center gap-3 text-xl uppercase tracking-tighter"
               >
                 Start Verwerking <Play className="w-6 h-6 fill-current" />

@@ -11,6 +11,10 @@ import { google } from "googleapis";
 import ffmpeg from "fluent-ffmpeg";
 import fs from "fs";
 import axios from "axios";
+import multer from "multer";
+
+// Configure multer for file uploads
+const upload = multer({ dest: "data/" });
 
 // Check if local ffmpeg exists and set path
 const localFfmpeg = path.join(process.cwd(), "ffmpeg");
@@ -32,8 +36,9 @@ async function startServer() {
   }
 
   // API Routes
-  app.post("/api/process", async (req, res) => {
+  app.post("/api/process", upload.single('videoFile'), async (req, res) => {
     const { driveUrl, series, host1, host2, guest, episodeNumber } = req.body;
+    const uploadedFile = req.file;
     
     // Helper to extract Drive ID
     const extractFileId = (link: string) => {
@@ -41,38 +46,40 @@ async function startServer() {
       return match ? match[0] : null;
     };
 
-    const fileId = extractFileId(driveUrl);
-    const downloadPath = path.join(dataDir, "original_video.mp4");
     const audioOutput = path.join(dataDir, "audio_extract.mp3");
 
     try {
-      // Step 0: Download from Drive
-      if (fileId) {
+      let downloadPath = "";
+      if (uploadedFile) {
+        downloadPath = uploadedFile.path;
+        console.log("Using uploaded file:", uploadedFile.originalname);
+      } else if (driveUrl) {
+        const fileId = extractFileId(driveUrl);
+        if (!fileId) throw new Error("Ongeldige Google Drive link.");
+        downloadPath = path.join(dataDir, "original_video.mp4");
         console.log(`Downloading file ID ${fileId} from Google Drive...`);
-        try {
-          const downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
-          const writer = fs.createWriteStream(downloadPath);
-          const response = await axios({
-            url: downloadUrl,
-            method: 'GET',
-            responseType: 'stream'
-          });
-          response.data.pipe(writer);
-          await new Promise<void>((resolve, reject) => {
-            writer.on('finish', () => resolve());
-            writer.on('error', (err) => reject(err));
-          });
-          console.log("Download complete.");
-        } catch (downloadErr: any) {
-          console.warn("Direct download failed, attempting alternate if public link is restrictive.");
-          // If the file is large, Drive might show a virus scan warning page.
-          // In a production app, we'd handle the 'confirm' parameter.
-        }
+        
+        const downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+        const writer = fs.createWriteStream(downloadPath);
+        const response = await axios({
+          url: downloadUrl,
+          method: 'GET',
+          responseType: 'stream'
+        });
+        response.data.pipe(writer);
+        await new Promise<void>((resolve, reject) => {
+          writer.on('finish', () => resolve());
+          writer.on('error', (err) => reject(err));
+        });
+        console.log("Download complete.");
+      } else {
+        throw new Error("Geen video bron opgegeven (link of bestand).");
       }
+
       // Step 1: Video Compressie
-      console.log(`Starting Step 1: Compression for ${driveUrl}`);
+      console.log(`Starting Step 1: Compression for ${uploadedFile ? ('Upload: ' + uploadedFile.originalname) : driveUrl}`);
       
-      const sourceFile = fs.existsSync(downloadPath) ? downloadPath : "/Users/ceesoddens/Library/CloudStorage/GoogleDrive-cees.oddens@gmail.com/Mijn Drive/PROJECTEN/ContentBotPhilip/MVW_CI_AFL_06_-16LKFSklein.mp3";
+      const sourceFile = downloadPath;
 
       // FFmpeg actual compression
       try {
