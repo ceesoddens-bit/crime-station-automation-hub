@@ -1,1 +1,26 @@
 @import "tailwindcss";
+
+@layer utilities {
+  .prose hr {
+    @apply border-t-2 border-dashed border-white/10 my-10;
+  }
+  .prose h3 {
+    @apply mt-12 mb-6 text-2xl font-bold text-orange-500 tracking-tight flex items-center gap-3;
+  }
+  .prose h1, .prose h2 {
+    @apply mt-8 mb-4 text-3xl font-bold text-white;
+  }
+  .prose p {
+    @apply leading-loose mb-8 text-gray-300 text-lg;
+  }
+  .prose ul {
+    @apply mb-8 space-y-3;
+  }
+  .prose li {
+    @apply text-gray-300 text-lg flex items-start gap-2;
+  }
+  /* If strong tags are used */
+  .prose strong {
+    @apply text-white font-bold;
+  }
+}

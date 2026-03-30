@@ -15,7 +15,8 @@ import {
   Share2,
   Video,
   Loader2,
-  Check
+  Check,
+  Copy
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -45,7 +46,9 @@ export default function App() {
   const [stepData, setStepData] = useState<Record<number, string>>({});
   const [isApproved, setIsApproved] = useState(false);
   const [lastGuest, setLastGuest] = useState('');
-  
+  const [selectedPlatform, setSelectedPlatform] = useState<'youtube' | 'spotify'>('youtube');
+  const [copiedPlatform, setCopiedPlatform] = useState<null | string>(null);
+
   // Load state from localStorage on mount
   useEffect(() => {
     const savedState = localStorage.getItem('crime-station-state');
@@ -155,6 +158,7 @@ export default function App() {
           2: data.artifact
         });
         setSelectedStepIndex(2); // Laat de gegenereerde tekst standaard zien
+        setSelectedPlatform('youtube');
         updateStepStatus(3, 'waiting');
       }
     } catch (error) {
@@ -184,6 +188,34 @@ export default function App() {
     } catch (error) {
       console.error(error);
       updateStepStatus(4, 'error');
+    }
+  };
+
+  const splitGeneratedContent = (content: string) => {
+    const youtubeIndex = content.search(/^#{1,6}\s*(?:🟥\s*)?YouTube\b/im);
+    const spotifyIndex = content.search(/^#{1,6}\s*(?:🟩\s*)?Spotify\b/im);
+    if (youtubeIndex === -1 || spotifyIndex === -1) return null;
+
+    if (youtubeIndex < spotifyIndex) {
+      return {
+        youtube: content.slice(youtubeIndex, spotifyIndex).trim(),
+        spotify: content.slice(spotifyIndex).trim(),
+      };
+    }
+
+    return {
+      spotify: content.slice(spotifyIndex, youtubeIndex).trim(),
+      youtube: content.slice(youtubeIndex).trim(),
+    };
+  };
+
+  const handleCopy = async (platform: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedPlatform(platform);
+      window.setTimeout(() => setCopiedPlatform(null), 1200);
+    } catch {
+      setCopiedPlatform(null);
     }
   };
 
@@ -486,9 +518,105 @@ export default function App() {
                       )}
                     </div>
                     
-                    <div className="prose prose-invert max-w-none prose-orange bg-black/30 rounded-xl p-6 border border-white/5">
-                      <ReactMarkdown>{stepData[selectedStepIndex]}</ReactMarkdown>
-                    </div>
+                    {selectedStepIndex === 2 ? (
+                      (() => {
+                        const content = stepData[selectedStepIndex];
+                        const sections = splitGeneratedContent(content);
+                        if (!sections) {
+                          return (
+                            <div className="prose prose-invert max-w-none prose-orange bg-black/30 rounded-xl p-6 border border-white/5">
+                              <ReactMarkdown>{content}</ReactMarkdown>
+                            </div>
+                          );
+                        }
+
+                        const activeText = selectedPlatform === 'youtube' ? sections.youtube : sections.spotify;
+
+                        return (
+                          <div className="bg-black/30 rounded-xl border border-white/5 overflow-hidden">
+                            <div className="flex items-center justify-between gap-4 p-4 border-b border-white/5">
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedPlatform('youtube')}
+                                  className={cn(
+                                    "px-3 py-2 rounded-lg border text-xs font-mono uppercase tracking-widest transition-all flex items-center gap-2",
+                                    selectedPlatform === 'youtube'
+                                      ? "bg-orange-600 border-orange-600 text-white"
+                                      : "bg-white/5 border-white/10 text-white/50 hover:text-white"
+                                  )}
+                                >
+                                  <Youtube className="w-4 h-4" /> YouTube
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedPlatform('spotify')}
+                                  className={cn(
+                                    "px-3 py-2 rounded-lg border text-xs font-mono uppercase tracking-widest transition-all flex items-center gap-2",
+                                    selectedPlatform === 'spotify'
+                                      ? "bg-orange-600 border-orange-600 text-white"
+                                      : "bg-white/5 border-white/10 text-white/50 hover:text-white"
+                                  )}
+                                >
+                                  <Music className="w-4 h-4" /> Spotify
+                                </button>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleCopy(`${selectedPlatform}-all`, activeText)}
+                                className="px-3 py-2 rounded-lg border border-white/10 bg-white/5 text-white/70 hover:text-white transition-all flex items-center gap-2 text-xs font-mono uppercase tracking-widest"
+                              >
+                                <Copy className="w-4 h-4" />
+                                {copiedPlatform === `${selectedPlatform}-all` ? "Gekopieerd" : "Kopieer Alles"}
+                              </button>
+                            </div>
+                            <div className="p-6 space-y-6">
+                              {(() => {
+                                const parts = activeText.split(/###\s+(.*)/g);
+                                if (parts.length <= 1) {
+                                  return (
+                                    <div className="prose prose-invert max-w-none prose-orange">
+                                      <ReactMarkdown>{activeText}</ReactMarkdown>
+                                    </div>
+                                  );
+                                }
+                                
+                                const sections = [];
+                                for (let i = 1; i < parts.length; i += 2) {
+                                  sections.push({
+                                    title: parts[i],
+                                    content: parts[i + 1].replace(/^\s*---\s*$/gm, '').trim()
+                                  });
+                                }
+
+                                return sections.map((section, idx) => (
+                                  <div key={idx} className="bg-white/5 border border-white/10 rounded-xl p-4 relative group">
+                                    <div className="flex items-center justify-between mb-4 pb-4 border-b border-white/5">
+                                      <h4 className="font-bold text-lg text-orange-500">{section.title}</h4>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleCopy(`${selectedPlatform}-${idx}`, section.content)}
+                                        className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/70 hover:text-white transition-all flex items-center gap-2 text-xs font-mono uppercase tracking-widest"
+                                      >
+                                        <Copy className="w-3 h-3" />
+                                        {copiedPlatform === `${selectedPlatform}-${idx}` ? "Gekopieerd" : "Kopieer"}
+                                      </button>
+                                    </div>
+                                    <div className="prose prose-invert max-w-none prose-orange prose-sm">
+                                      <ReactMarkdown>{section.content}</ReactMarkdown>
+                                    </div>
+                                  </div>
+                                ));
+                              })()}
+                            </div>
+                          </div>
+                        );
+                      })()
+                    ) : (
+                      <div className="prose prose-invert max-w-none prose-orange bg-black/30 rounded-xl p-6 border border-white/5">
+                        <ReactMarkdown>{stepData[selectedStepIndex]}</ReactMarkdown>
+                      </div>
+                    )}
 
                     {selectedStepIndex === 2 && isApproved && (
                       <motion.div 

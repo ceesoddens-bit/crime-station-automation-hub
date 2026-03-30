@@ -164,6 +164,11 @@ async function startServer() {
 
       // Step 3: Tekstgeneratie
       console.log("Starting Step 3: Text Generation");
+      const guestName = typeof guest === "string" ? guest.trim() : "";
+      const guestLine = guestName ? `Gast: ${guestName}` : "Gast: (geen)";
+      const introInstruction = guestName
+        ? `3. Gebruik de namen van de presentatoren (${host1} en ${host2}) en de gast (${guestName}) indien ingevuld in de intro. Beschrijf de dialoog tussen de presentatoren en hun gast over de zaak.`
+        : `3. Gebruik de namen van de presentatoren (${host1} en ${host2}) in de intro. Er is geen gast in deze aflevering; noem dus geen gast. Beschrijf de dialoog tussen de presentatoren over de zaak.`;
       const promptText = `
         Je bent een content creator voor Crime Station. Genereer YouTube en Spotify teksten op basis van de onderstaande transcriptie.
         De stijl moet exact overeenkomen met dit voorbeeld:
@@ -190,15 +195,67 @@ async function startServer() {
         Serie: ${series}
         Presentator 1: ${host1}
         Presentator 2: ${host2}
-        Gast: ${guest}
+        ${guestLine}
         Aflevering Nummer: ${episodeNumber}
         Transcriptie: ${transcription}
 
         INSTRUCTIES:
         1. Titel: Maak een pakkende titel in de stijl: "[Onderwerp] | [Sub-onderwerp] | ${series} #${episodeNumber}"
         2. Intro: Maximaal 3-4 zinnen, eindigend met "Luisteren!!"
-        3. Gebruik de namen van de presentatoren (${host1} en ${host2}) en de gast (${guest}) indien ingevuld in de intro. Beschrijf de dialoog tussen de presentatoren en hun gast over de zaak.
-        5. Genereer één blok voor YouTube en één korter blok voor Spotify in dezelfde stijl.
+        ${introInstruction}
+        4. Maak het overzichtelijk, ruim opgezet en direct te kopiëren. Gebruik emoji's in de kopjes.
+        5. Zorg voor VEEL extra witregels tussen alle secties en na elke alinea.
+        6. Output ALLEEN in Markdown met exact deze structuur (geen extra tekst erboven/eronder):
+
+        # 🟥 YouTube
+
+        ---
+
+        ### 📝 Titel
+        
+        [Titel hier]
+
+        ---
+
+        ### 📄 Beschrijving
+        
+        [Intro en rest van de beschrijving met veel witregels]
+
+        ---
+
+        ### 🏷️ Hashtags
+        
+        [Hashtags hier]
+
+        ---
+
+        ### 🔗 Credits
+        
+        - 🌐 www.crimestation.nl
+        - ©️ CRIME STATION: Crime Report, Crime Insight, Cold Cases: Never Give Up, Schoffies, Crime Business, Daily Wely, Online Security, Meer informatie
+        
+        
+        
+        # 🟩 Spotify
+
+        ---
+
+        ### 📝 Titel
+        
+        [Titel hier]
+
+        ---
+
+        ### 📄 Beschrijving
+        
+        [Kortere intro en beschrijving met veel witregels]
+
+        ---
+
+        ### 🔗 Credits
+        
+        - 🌐 www.crimestation.nl
+        - ©️ CRIME STATION: Crime Report, Crime Insight, Cold Cases: Never Give Up, Schoffies, Crime Business, Daily Wely, Online Security, Meer informatie
       `;
       const genResponse = await ai.models.generateContent({
         model: "gemini-2.5-flash",
