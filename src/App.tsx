@@ -173,8 +173,8 @@ export default function App() {
         updateStepStatus(2, 'completed');
         setStepData({
           0: "Video is succesvol gedownload en gecomprimeerd naar 10MB (proxy voor verwerking).",
-          1: data.transcription || "Geen transcriptie beschikbaar.",
-          2: data.artifact
+          1: data.data?.transcription || "Geen transcriptie beschikbaar.",
+          2: data.data?.artifact
         });
         setSelectedStepIndex(2); // Laat de gegenereerde tekst standaard zien
         setSelectedPlatform('youtube');
@@ -183,10 +183,16 @@ export default function App() {
     } catch (error: any) {
       console.error(error);
       const errorMessage = error.response?.data?.error || '';
-      let errorStep = 0;
+      const step = error.response?.data?.step;
       
-      if (errorMessage.includes('Step 2')) errorStep = 1;
-      else if (errorMessage.includes('Step 3')) errorStep = 2;
+      let errorStep = 0;
+      if (typeof step === 'number' && step >= 0) {
+        errorStep = step;
+      } else if (errorMessage.includes('Step 2')) {
+        errorStep = 1;
+      } else if (errorMessage.includes('Step 3')) {
+        errorStep = 2;
+      }
       
       updateStepStatus(errorStep, 'error');
     }
@@ -227,14 +233,29 @@ export default function App() {
   };
 
   const splitGeneratedContent = (content: string) => {
-    // Probeer eerst te parsen als JSON
+    if (!content) return null;
+
     try {
-      // Zoek naar JSON blok of probeer de hele string
-      const jsonStr = content.match(/\{[\s\S]*\}/) ? content.match(/\{[\s\S]*\}/)![0] : content;
-      const data = JSON.parse(jsonStr);
+      // 1. Try to extract and clean JSON
+      let jsonStr = content;
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        jsonStr = jsonMatch[0];
+      }
+
+      // Handle unescaped newlines in JSON values (common LLM error)
+      // This is a rough fix: replace raw newlines within string values with \n
+      const cleanedJson = jsonStr.replace(/: "(.*?)",/gs, (match, p1) => {
+        return `: "${p1.replace(/\n/g, '\\n')}",`;
+      }).replace(/: "(.*?)"\n?}/gs, (match, p1) => {
+        return `: "${p1.replace(/\n/g, '\\n')}"}`;
+      });
+
+      const data = JSON.parse(cleanedJson);
       
-      if (data.youtube && data.spotify) {
+      if (data.youtube || data.spotify || data.website) {
         const formatSections = (platformData: any) => {
+          if (!platformData) return "";
           let md = "";
           if (platformData.titel) md += `### 📝 Titel\n${platformData.titel}\n\n`;
           if (platformData.beschrijving) md += `### 📄 Beschrijving\n${platformData.beschrijving}\n\n`;
@@ -242,7 +263,6 @@ export default function App() {
             const tags = Array.isArray(platformData.hashtags) ? platformData.hashtags.join(' ') : platformData.hashtags;
             md += `### 🏷️ Hashtags\n${tags}\n\n`;
           }
-          // Website specifieke velden
           if (platformData.seo_titel) md += `### 🔍 SEO Titel\n${platformData.seo_titel}\n\n`;
           if (platformData.url_slug) md += `### 🔗 URL Slug\n${platformData.url_slug}\n\n`;
           if (platformData.meta_description) md += `### 📋 Meta Description\n${platformData.meta_description}\n\n`;
@@ -252,39 +272,48 @@ export default function App() {
         return {
           youtube: formatSections(data.youtube),
           spotify: formatSections(data.spotify),
-          website: formatSections(data.website || {})
+          website: formatSections(data.website)
         };
       }
     } catch (e) {
-      // Geen JSON of parse error, ga door naar de Markdown logica
+      console.warn("JSON parse fallback failed, trying Markdown markers", e);
     }
 
-    // Vind de posities van de grote koppen (Old-style Markdown)
-    const youtubeIdx = content.search(/^#{1,6}\s*(?:🟥\s*)?YouTube\b/im);
-    const spotifyIdx = content.search(/^#{1,6}\s*(?:🟩\s*)?Spotify\b/im);
-    const websiteIdx = content.search(/^#{1,6}\s*(?:🌐\s*)?Website\b/im);
+    // 2. Fallback to Markdown markers (including those with **YOUTUBE** bolding)
+    const findSection = (platform: string) => {
+      const regex = new RegExp(`(?:#{1,6}|\\*\\*)\\s*(?:[\\u2700-\\u2b55]\\s*)?${platform}\\b`, 'i');
+      const start = content.search(regex);
+      if (start === -1) return null;
+      
+      const rest = content.slice(start);
+      // Find the next platform marker
+      const nextMarkers = ['YouTube', 'Spotify', 'Website'].filter(p => p.toLowerCase() !== platform.toLowerCase());
+      let end = rest.length;
+      nextMarkers.forEach(p => {
+        const nextRegex = new RegExp(`(?:#{1,6}|\\*\\*)\\s*(?:[\\u2700-\\u2b55]\\s*)?${p}\\b`, 'i');
+        const nextMatch = rest.slice(1).search(nextRegex);
+        if (nextMatch !== -1 && nextMatch + 1 < end) {
+          end = nextMatch + 1;
+        }
+      });
+      
+      return rest.slice(0, end).trim();
+    };
 
-    // Als we helemaal niks vinden, toon dan de ruwe tekst
-    if (youtubeIdx === -1 && spotifyIdx === -1 && websiteIdx === -1) return null;
+    const youtube = findSection('YouTube');
+    const spotify = findSection('Spotify');
+    const website = findSection('Website');
 
-    // We knippen de stukken tekst uit
-    const nextAfterYoutube = [spotifyIdx, websiteIdx].filter(i => i > youtubeIdx && i !== -1).sort((a, b) => a - b)[0];
-    const youtubeRaw = youtubeIdx !== -1 ? content.slice(youtubeIdx, nextAfterYoutube).trim() : '';
-
-    const nextAfterSpotify = [websiteIdx, youtubeIdx].filter(i => i > spotifyIdx && i !== -1).sort((a, b) => a - b)[0];
-    const spotifyRaw = spotifyIdx !== -1 ? content.slice(spotifyIdx, nextAfterSpotify).trim() : '';
-
-    const nextAfterWebsite = [youtubeIdx, spotifyIdx].filter(i => i > websiteIdx && i !== -1).sort((a, b) => a - b)[0];
-    const websiteRaw = websiteIdx !== -1 ? content.slice(websiteIdx, nextAfterWebsite).trim() : '';
-
-    const stripHeader = (text: string) => text.replace(/^#{1,6}\s*(?:🟥|🟩|🌐)?\s*(?:YouTube|Spotify|Website)\b\s*\n?/im, '').trim();
+    if (!youtube && !spotify && !website) return null;
 
     return {
-      youtube: stripHeader(youtubeRaw),
-      spotify: stripHeader(spotifyRaw),
-      website: stripHeader(websiteRaw)
+      youtube: youtube || '',
+      spotify: spotify || '',
+      website: website || ''
     };
   };
+
+
 
   const handleCopy = async (platform: string, text: string) => {
     try {
@@ -646,7 +675,7 @@ export default function App() {
                         const sections = splitGeneratedContent(content);
                         if (!sections) {
                           return (
-                            <div className="prose prose-invert max-w-none prose-orange bg-black/30 rounded-xl p-6 border border-white/5">
+                            <div className="prose prose-invert max-w-none prose-orange bg-black/30 rounded-xl p-6 border border-white/5 whitespace-pre-wrap">
                               <ReactMarkdown>{content}</ReactMarkdown>
                             </div>
                           );
@@ -713,7 +742,7 @@ export default function App() {
                                 const parts = activeText.split(/###\s+(.*)/g);
                                 if (parts.length <= 1) {
                                   return (
-                                    <div className="prose prose-invert max-w-none prose-orange">
+                                    <div className="prose prose-invert max-w-none prose-orange whitespace-pre-wrap">
                                       <ReactMarkdown>{activeText}</ReactMarkdown>
                                     </div>
                                   );
@@ -740,7 +769,7 @@ export default function App() {
                                         {copiedPlatform === `${selectedPlatform}-${idx}` ? "Gekopieerd" : "Kopieer"}
                                       </button>
                                     </div>
-                                    <div className="prose prose-invert max-w-none prose-orange prose-sm">
+                                    <div className="prose prose-invert max-w-none prose-orange prose-sm whitespace-pre-wrap">
                                       <ReactMarkdown>{section.content}</ReactMarkdown>
                                     </div>
                                   </div>
