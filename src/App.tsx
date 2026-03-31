@@ -16,7 +16,9 @@ import {
   Video,
   Loader2,
   Check,
-  Copy
+  Copy,
+  Pencil,
+  Globe
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -52,8 +54,10 @@ export default function App() {
   const [isApproved, setIsApproved] = useState(false);
   const [publishLinks, setPublishLinks] = useState<PublishLinks | null>(null);
   const [lastGuest, setLastGuest] = useState('');
-  const [selectedPlatform, setSelectedPlatform] = useState<'youtube' | 'spotify'>('youtube');
+  const [selectedPlatform, setSelectedPlatform] = useState<'youtube' | 'spotify' | 'website'>('youtube');
   const [copiedPlatform, setCopiedPlatform] = useState<null | string>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editText, setEditText] = useState('');
 
   // Load state from localStorage on mount
   useEffect(() => {
@@ -176,9 +180,15 @@ export default function App() {
         setSelectedPlatform('youtube');
         updateStepStatus(3, 'waiting');
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
-      updateStepStatus(currentStep, 'error');
+      const errorMessage = error.response?.data?.error || '';
+      let errorStep = 0;
+      
+      if (errorMessage.includes('Step 2')) errorStep = 1;
+      else if (errorMessage.includes('Step 3')) errorStep = 2;
+      
+      updateStepStatus(errorStep, 'error');
     }
   };
 
@@ -217,20 +227,62 @@ export default function App() {
   };
 
   const splitGeneratedContent = (content: string) => {
-    const youtubeIndex = content.search(/^#{1,6}\s*(?:🟥\s*)?YouTube\b/im);
-    const spotifyIndex = content.search(/^#{1,6}\s*(?:🟩\s*)?Spotify\b/im);
-    if (youtubeIndex === -1 || spotifyIndex === -1) return null;
+    // Probeer eerst te parsen als JSON
+    try {
+      // Zoek naar JSON blok of probeer de hele string
+      const jsonStr = content.match(/\{[\s\S]*\}/) ? content.match(/\{[\s\S]*\}/)![0] : content;
+      const data = JSON.parse(jsonStr);
+      
+      if (data.youtube && data.spotify) {
+        const formatSections = (platformData: any) => {
+          let md = "";
+          if (platformData.titel) md += `### 📝 Titel\n${platformData.titel}\n\n`;
+          if (platformData.beschrijving) md += `### 📄 Beschrijving\n${platformData.beschrijving}\n\n`;
+          if (platformData.hashtags) {
+            const tags = Array.isArray(platformData.hashtags) ? platformData.hashtags.join(' ') : platformData.hashtags;
+            md += `### 🏷️ Hashtags\n${tags}\n\n`;
+          }
+          // Website specifieke velden
+          if (platformData.seo_titel) md += `### 🔍 SEO Titel\n${platformData.seo_titel}\n\n`;
+          if (platformData.url_slug) md += `### 🔗 URL Slug\n${platformData.url_slug}\n\n`;
+          if (platformData.meta_description) md += `### 📋 Meta Description\n${platformData.meta_description}\n\n`;
+          return md.trim();
+        };
 
-    if (youtubeIndex < spotifyIndex) {
-      return {
-        youtube: content.slice(youtubeIndex, spotifyIndex).trim(),
-        spotify: content.slice(spotifyIndex).trim(),
-      };
+        return {
+          youtube: formatSections(data.youtube),
+          spotify: formatSections(data.spotify),
+          website: formatSections(data.website || {})
+        };
+      }
+    } catch (e) {
+      // Geen JSON of parse error, ga door naar de Markdown logica
     }
 
+    // Vind de posities van de grote koppen (Old-style Markdown)
+    const youtubeIdx = content.search(/^#{1,6}\s*(?:🟥\s*)?YouTube\b/im);
+    const spotifyIdx = content.search(/^#{1,6}\s*(?:🟩\s*)?Spotify\b/im);
+    const websiteIdx = content.search(/^#{1,6}\s*(?:🌐\s*)?Website\b/im);
+
+    // Als we helemaal niks vinden, toon dan de ruwe tekst
+    if (youtubeIdx === -1 && spotifyIdx === -1 && websiteIdx === -1) return null;
+
+    // We knippen de stukken tekst uit
+    const nextAfterYoutube = [spotifyIdx, websiteIdx].filter(i => i > youtubeIdx && i !== -1).sort((a, b) => a - b)[0];
+    const youtubeRaw = youtubeIdx !== -1 ? content.slice(youtubeIdx, nextAfterYoutube).trim() : '';
+
+    const nextAfterSpotify = [websiteIdx, youtubeIdx].filter(i => i > spotifyIdx && i !== -1).sort((a, b) => a - b)[0];
+    const spotifyRaw = spotifyIdx !== -1 ? content.slice(spotifyIdx, nextAfterSpotify).trim() : '';
+
+    const nextAfterWebsite = [youtubeIdx, spotifyIdx].filter(i => i > websiteIdx && i !== -1).sort((a, b) => a - b)[0];
+    const websiteRaw = websiteIdx !== -1 ? content.slice(websiteIdx, nextAfterWebsite).trim() : '';
+
+    const stripHeader = (text: string) => text.replace(/^#{1,6}\s*(?:🟥|🟩|🌐)?\s*(?:YouTube|Spotify|Website)\b\s*\n?/im, '').trim();
+
     return {
-      spotify: content.slice(spotifyIndex, youtubeIndex).trim(),
-      youtube: content.slice(youtubeIndex).trim(),
+      youtube: stripHeader(youtubeRaw),
+      spotify: stripHeader(spotifyRaw),
+      website: stripHeader(websiteRaw)
     };
   };
 
@@ -545,17 +597,50 @@ export default function App() {
                           <p className="text-sm text-gray-500">{steps[selectedStepIndex].description}</p>
                         </div>
                       </div>
-                      {selectedStepIndex === 2 && !isApproved && (
-                        <button 
-                          onClick={handleApprove}
-                          className="bg-green-600 hover:bg-green-500 text-white px-6 py-2 rounded-lg font-bold transition-all flex items-center gap-2"
-                        >
-                          Goedgekeurd <Check className="w-4 h-4" />
-                        </button>
-                      )}
+                      <div className="flex items-center gap-3">
+                        {selectedStepIndex !== null && (
+                          <button 
+                            onClick={() => {
+                              if (isEditing) {
+                                // Save changes
+                                setStepData(prev => ({ ...prev, [selectedStepIndex]: editText }));
+                                setIsEditing(false);
+                              } else {
+                                // Start editing
+                                setEditText(stepData[selectedStepIndex] || '');
+                                setIsEditing(true);
+                              }
+                            }}
+                            className={cn(
+                              "p-2 rounded-lg transition-all flex items-center gap-2 font-bold",
+                              isEditing 
+                                ? "bg-green-600 text-white hover:bg-green-500" 
+                                : "bg-white/5 text-gray-400 hover:text-white hover:bg-white/10"
+                            )}
+                            title={isEditing ? "Opslaan" : "Bewerken"}
+                          >
+                            {isEditing ? <><Check className="w-4 h-4" /> Opslaan</> : <Pencil className="w-4 h-4" />}
+                          </button>
+                        )}
+                        {selectedStepIndex === 2 && !isApproved && !isEditing && (
+                          <button 
+                            onClick={handleApprove}
+                            className="bg-green-600 hover:bg-green-500 text-white px-6 py-2 rounded-lg font-bold transition-all flex items-center gap-2"
+                          >
+                            Goedgekeurd <Check className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                     
-                    {selectedStepIndex === 2 ? (
+                    {isEditing ? (
+                      <textarea
+                        value={editText}
+                        onChange={(e) => setEditText(e.target.value)}
+                        className="w-full h-[500px] bg-black/40 border border-white/10 rounded-xl p-6 text-gray-200 font-mono text-sm focus:outline-none focus:border-orange-500/50 resize-none"
+                        placeholder="Bewerk de tekst hier..."
+                      />
+                    ) : selectedStepIndex === 2 ? (
                       (() => {
                         const content = stepData[selectedStepIndex];
                         const sections = splitGeneratedContent(content);
@@ -567,7 +652,11 @@ export default function App() {
                           );
                         }
 
-                        const activeText = selectedPlatform === 'youtube' ? sections.youtube : sections.spotify;
+                        const activeText = selectedPlatform === 'youtube' 
+                          ? sections.youtube 
+                          : selectedPlatform === 'spotify' 
+                            ? sections.spotify 
+                            : sections.website;
 
                         return (
                           <div className="bg-black/30 rounded-xl border border-white/5 overflow-hidden">
@@ -596,6 +685,18 @@ export default function App() {
                                   )}
                                 >
                                   <Music className="w-4 h-4" /> Spotify
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedPlatform('website')}
+                                  className={cn(
+                                    "px-3 py-2 rounded-lg border text-xs font-mono uppercase tracking-widest transition-all flex items-center gap-2",
+                                    selectedPlatform === 'website'
+                                      ? "bg-orange-600 border-orange-600 text-white"
+                                      : "bg-white/5 border-white/10 text-white/50 hover:text-white"
+                                  )}
+                                >
+                                  <Globe className="w-4 h-4" /> Website
                                 </button>
                               </div>
                               <button
