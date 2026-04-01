@@ -1,125 +1,24 @@
-import dotenv from "dotenv";
-import path from "path";
-dotenv.config();
+import * as fs from 'fs';
+import * as path from 'path';
 
-import express from "express";
-import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
-import ffmpeg from "fluent-ffmpeg";
-import fs from "fs";
-import net from "net";
-import axios from "axios";
-import multer from "multer";
+const serverFile = path.resolve('/Users/amberbordewijk/Documents/Freelance/PodcastFlow 2/server.ts');
+let content = fs.readFileSync(serverFile, 'utf8');
 
-// Configure multer for file uploads - 10GB limit
-const upload = multer({ 
-  dest: "data/", 
-  limits: { fileSize: 10 * 1024 * 1024 * 1024 } 
-});
-
-// Check if local ffmpeg exists and set path
-const localFfmpeg = path.join(process.cwd(), "ffmpeg");
-if (fs.existsSync(localFfmpeg)) {
-  ffmpeg.setFfmpegPath(localFfmpeg);
-}
-
-async function startServer() {
-  const app = express();
-  const HOST = "0.0.0.0";
-  const desiredPort = 3000;
-  const desiredHmrPort = 24678;
-
-  app.use(express.json());
-
-  const findAvailablePort = async (startPort: number, host: string) => {
-    for (let port = startPort; port < startPort + 50; port += 1) {
-      const available = await new Promise<boolean>((resolve) => {
-        const server = net.createServer();
-        server.once("error", (err: any) => {
-          server.close();
-          if (err?.code === "EADDRINUSE") resolve(false);
-          else resolve(true);
-        });
-        server.once("listening", () => {
-          server.close(() => resolve(true));
-        });
-        server.listen(port, host);
-      });
-      if (available) return port;
-    }
-    return startPort;
-  };
-
-  const dataDir = path.join(process.cwd(), "data");
-  if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
-
-  app.post("/api/process", upload.single('videoFile'), async (req, res) => {
-    const { series, host1, host2, guest, episodeNumber } = req.body;
-    const uploadedFile = req.file;
-    const requestId = Date.now().toString();
-    const audioOutput = path.join(dataDir, `audio_${requestId}.mp3`);
-
-    try {
-      if (!uploadedFile) throw new Error("Geen bestand geüpload.");
-      const sourceFile = uploadedFile.path;
-
-      // Step 1: Compression
-      console.log(`[${requestId}] Starting Step 1: Audio Extraction...`);
-      await new Promise<void>((resolve, reject) => {
-        ffmpeg(sourceFile)
-          .noVideo()
-          .audioCodec("libmp3lame")
-          .audioBitrate("64k")
-          .audioChannels(1)
-          .on("end", () => resolve())
-          .on("error", (err) => reject(err))
-          .save(audioOutput);
-      });
-
-      // Step 2: Transcription
-      console.log(`[${requestId}] Starting Step 2: Transcription`);
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) throw new Error("GEMINI_API_KEY is missing.");
-      const ai = new GoogleGenAI({ apiKey });
-
-      // Using Base64 (inlineData) as in the original working version
-      const audioData = fs.readFileSync(audioOutput).toString("base64");
-      
-      const transcriptionResponse = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [{ 
-          role: 'user', 
-          parts: [
-            { inlineData: { data: audioData, mimeType: "audio/mp3" } },
-            { text: "Transcribeer deze audio van een Crime Station aflevering nauwkeurig. Behoud tijdcodes." }
-          ] 
-        }]
-      });
-
-      const transcription = transcriptionResponse.text;
-      if (!transcription) throw new Error("Transcriptie mislukt.");
-      console.log(`[${requestId}] Transcription completed.`);
-
-      // Step 3: Tekstgeneratie
-      console.log(`[${requestId}] Starting Step 3: Text Generation`);
-      const guestLine = guest ? `Gast: ${guest}` : "Gast: (geen)";
-      
-      const promptText = `
-Je bent de Crime Station Publicatie-agent. Je ontvangt een transcriptie van een aflevering en genereert daarvoor een titel en beschrijvingen voor YouTube, Spotify en crimestation.nl.
+const rawPrompt = `Je bent de Crime Station Publicatie-agent. Je ontvangt een transcriptie van een aflevering en genereert daarvoor een titel en beschrijvingen voor YouTube, Spotify en crimestation.nl.
 
 De volgende informatie wordt automatisch meegegeven vanuit de Content Hub UI — je hoeft hier niet naar te vragen:
 
-- **Serie**: ${series}
-- **Afleveringsnummer**: ${episodeNumber}
-- **Presentator 1**: ${host1}
-- **Presentator 2**: ${host2}
-- **Naam gast**: ${guestLine}
+- **Serie**: \${series}
+- **Afleveringsnummer**: \${episodeNumber}
+- **Presentator 1**: \${host1}
+- **Presentator 2**: \${host2}
+- **Naam gast**: \${guestLine}
 
 De transcriptie is al beschikbaar. Je start direct met stap 1.
 
 ---
 [TRANSCRIPTIE BEGIN]
-${transcription}
+\${transcription}
 [TRANSCRIPTIE EINDE]
 ---
 
@@ -279,6 +178,7 @@ Meer weten? Ga naar crimestation.nl | Tips? Mail lid@crimestation.nl
 
 **Wat Website anders maakt dan YouTube en Spotify:**
 - Uitgebreider — meer achtergrond, context en duiding dan de andere platforms
+- Geschreven voor iemand die de aflevering nog niet kent en via Google binnenkomt
 - Geen tijdstempels
 - Zoektermen organisch verwerken voor Google-vindbaarheid
 - Geen abonneer-CTA — wel verwijzing naar Crime Station
@@ -350,69 +250,18 @@ Hieronder staat een ingevuld voorbeeldformaat. Vervang alle waarden door de daad
 \`\`\`
 
 Genereer op basis van dit formaat de daadwerkelijke output voor de aflevering. Vul alle velden volledig in. Geen lege strings, geen placeholders. Regelafbrekingen zijn \\n.
-      `;
+`;
 
-      const genResponse = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [{ role: "user", parts: [{ text: promptText }] }],
-        config: {
-          temperature: 0.7,
-          tools: [{ googleSearch: {} }]
-        }
-      });
+let escapedPrompt = rawPrompt.replace(/`/g, '\\`');
+let finalPromptCode = "\`\n" + escapedPrompt + "\n      \`";
 
-      let generatedContent = genResponse.text;
-      const jsonMatch = generatedContent.match(/\{[\s\S]*\}/);
-      let artifactContent = jsonMatch ? jsonMatch[0] : generatedContent;
+const startIdx = content.search(/const promptText = /);
+const startTarget = "const promptText = ";
+const prefix = content.slice(0, startIdx + startTarget.length);
 
-      console.log(`[${requestId}] Step 3: Text Generation completed.`);
+const genResponseIdx = content.indexOf("const genResponse = await ai.models.generateContent({");
+const suffix = content.slice(genResponseIdx);
 
-      // Step 4: Creating Artifact
-      fs.writeFileSync(path.join(dataDir, "concept.json"), artifactContent || "");
-
-      res.json({ 
-        status: "waiting_approval", 
-        data: {
-          artifact: artifactContent,
-          transcription: transcription
-        }
-      });
-    } catch (error: any) {
-      console.error(`[${requestId}] Error:`, error);
-      res.status(500).json({ error: error.message || "Processing failed" });
-    }
-  });
-
-  app.post("/api/approve", async (req, res) => {
-    res.json({ status: "completed", links: { youtube: "mock", spotify: "mock" } });
-  });
-
-  if (process.env.NODE_ENV !== "production") {
-    const PORT = await findAvailablePort(desiredPort, HOST);
-    const hmrPort = await findAvailablePort(desiredHmrPort, HOST);
-
-    const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: { port: hmrPort } },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-
-    const server = app.listen(PORT, HOST, () => {
-      console.log(`Server running on http://localhost:${PORT}`);
-    });
-    server.timeout = 30 * 60 * 1000; // 30 minutes
-  } else {
-    const PORT = desiredPort;
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-    const server = app.listen(PORT, HOST, () => {
-      console.log(`Server running on http://localhost:${PORT}`);
-    });
-    server.timeout = 30 * 60 * 1000;
-  }
-}
-
-startServer();
+const newContent = prefix + finalPromptCode + ";\n\n      " + suffix;
+fs.writeFileSync(serverFile, newContent);
+console.log("Replaced cleanly!");

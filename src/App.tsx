@@ -16,7 +16,9 @@ import {
   Video,
   Loader2,
   Check,
-  Copy
+  Copy,
+  Pencil,
+  Globe
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -52,8 +54,10 @@ export default function App() {
   const [isApproved, setIsApproved] = useState(false);
   const [publishLinks, setPublishLinks] = useState<PublishLinks | null>(null);
   const [lastGuest, setLastGuest] = useState('');
-  const [selectedPlatform, setSelectedPlatform] = useState<'youtube' | 'spotify'>('youtube');
+  const [selectedPlatform, setSelectedPlatform] = useState<'youtube' | 'spotify' | 'website'>('youtube');
   const [copiedPlatform, setCopiedPlatform] = useState<null | string>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editText, setEditText] = useState('');
 
   // Load state from localStorage on mount
   useEffect(() => {
@@ -169,16 +173,28 @@ export default function App() {
         updateStepStatus(2, 'completed');
         setStepData({
           0: "Video is succesvol gedownload en gecomprimeerd naar 10MB (proxy voor verwerking).",
-          1: data.transcription || "Geen transcriptie beschikbaar.",
-          2: data.artifact
+          1: data.data?.transcription || "Geen transcriptie beschikbaar.",
+          2: data.data?.artifact
         });
         setSelectedStepIndex(2); // Laat de gegenereerde tekst standaard zien
         setSelectedPlatform('youtube');
         updateStepStatus(3, 'waiting');
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
-      updateStepStatus(currentStep, 'error');
+      const errorMessage = error.response?.data?.error || '';
+      const step = error.response?.data?.step;
+      
+      let errorStep = 0;
+      if (typeof step === 'number' && step >= 0) {
+        errorStep = step;
+      } else if (errorMessage.includes('Step 2')) {
+        errorStep = 1;
+      } else if (errorMessage.includes('Step 3')) {
+        errorStep = 2;
+      }
+      
+      updateStepStatus(errorStep, 'error');
     }
   };
 
@@ -217,22 +233,87 @@ export default function App() {
   };
 
   const splitGeneratedContent = (content: string) => {
-    const youtubeIndex = content.search(/^#{1,6}\s*(?:🟥\s*)?YouTube\b/im);
-    const spotifyIndex = content.search(/^#{1,6}\s*(?:🟩\s*)?Spotify\b/im);
-    if (youtubeIndex === -1 || spotifyIndex === -1) return null;
+    if (!content) return null;
 
-    if (youtubeIndex < spotifyIndex) {
-      return {
-        youtube: content.slice(youtubeIndex, spotifyIndex).trim(),
-        spotify: content.slice(spotifyIndex).trim(),
-      };
+    try {
+      // 1. Try to extract and clean JSON
+      let jsonStr = content;
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        jsonStr = jsonMatch[0];
+      }
+
+      // Handle unescaped newlines in JSON values (common LLM error)
+      // This is a rough fix: replace raw newlines within string values with \n
+      const cleanedJson = jsonStr.replace(/: "(.*?)",/gs, (match, p1) => {
+        return `: "${p1.replace(/\n/g, '\\n')}",`;
+      }).replace(/: "(.*?)"\n?}/gs, (match, p1) => {
+        return `: "${p1.replace(/\n/g, '\\n')}"}`;
+      });
+
+      const data = JSON.parse(cleanedJson);
+      
+      if (data.youtube || data.spotify || data.website) {
+        const formatSections = (platformData: any) => {
+          if (!platformData) return "";
+          let md = "";
+          if (platformData.titel) md += `### 📝 Titel\n${platformData.titel}\n\n`;
+          if (platformData.beschrijving) md += `### 📄 Beschrijving\n${platformData.beschrijving}\n\n`;
+          if (platformData.hashtags) {
+            const tags = Array.isArray(platformData.hashtags) ? platformData.hashtags.join(' ') : platformData.hashtags;
+            md += `### 🏷️ Hashtags\n${tags}\n\n`;
+          }
+          if (platformData.seo_titel) md += `### 🔍 SEO Titel\n${platformData.seo_titel}\n\n`;
+          if (platformData.url_slug) md += `### 🔗 URL Slug\n${platformData.url_slug}\n\n`;
+          if (platformData.meta_description) md += `### 📋 Meta Description\n${platformData.meta_description}\n\n`;
+          return md.trim();
+        };
+
+        return {
+          youtube: formatSections(data.youtube),
+          spotify: formatSections(data.spotify),
+          website: formatSections(data.website)
+        };
+      }
+    } catch (e) {
+      console.warn("JSON parse fallback failed, trying Markdown markers", e);
     }
 
+    // 2. Fallback to Markdown markers (including those with **YOUTUBE** bolding)
+    const findSection = (platform: string) => {
+      const regex = new RegExp(`(?:#{1,6}|\\*\\*)\\s*(?:[\\u2700-\\u2b55]\\s*)?${platform}\\b`, 'i');
+      const start = content.search(regex);
+      if (start === -1) return null;
+      
+      const rest = content.slice(start);
+      // Find the next platform marker
+      const nextMarkers = ['YouTube', 'Spotify', 'Website'].filter(p => p.toLowerCase() !== platform.toLowerCase());
+      let end = rest.length;
+      nextMarkers.forEach(p => {
+        const nextRegex = new RegExp(`(?:#{1,6}|\\*\\*)\\s*(?:[\\u2700-\\u2b55]\\s*)?${p}\\b`, 'i');
+        const nextMatch = rest.slice(1).search(nextRegex);
+        if (nextMatch !== -1 && nextMatch + 1 < end) {
+          end = nextMatch + 1;
+        }
+      });
+      
+      return rest.slice(0, end).trim();
+    };
+
+    const youtube = findSection('YouTube');
+    const spotify = findSection('Spotify');
+    const website = findSection('Website');
+
+    if (!youtube && !spotify && !website) return null;
+
     return {
-      spotify: content.slice(spotifyIndex, youtubeIndex).trim(),
-      youtube: content.slice(youtubeIndex).trim(),
+      youtube: youtube || '',
+      spotify: spotify || '',
+      website: website || ''
     };
   };
+
+
 
   const handleCopy = async (platform: string, text: string) => {
     try {
@@ -545,29 +626,66 @@ export default function App() {
                           <p className="text-sm text-gray-500">{steps[selectedStepIndex].description}</p>
                         </div>
                       </div>
-                      {selectedStepIndex === 2 && !isApproved && (
-                        <button 
-                          onClick={handleApprove}
-                          className="bg-green-600 hover:bg-green-500 text-white px-6 py-2 rounded-lg font-bold transition-all flex items-center gap-2"
-                        >
-                          Goedgekeurd <Check className="w-4 h-4" />
-                        </button>
-                      )}
+                      <div className="flex items-center gap-3">
+                        {selectedStepIndex !== null && (
+                          <button 
+                            onClick={() => {
+                              if (isEditing) {
+                                // Save changes
+                                setStepData(prev => ({ ...prev, [selectedStepIndex]: editText }));
+                                setIsEditing(false);
+                              } else {
+                                // Start editing
+                                setEditText(stepData[selectedStepIndex] || '');
+                                setIsEditing(true);
+                              }
+                            }}
+                            className={cn(
+                              "p-2 rounded-lg transition-all flex items-center gap-2 font-bold",
+                              isEditing 
+                                ? "bg-green-600 text-white hover:bg-green-500" 
+                                : "bg-white/5 text-gray-400 hover:text-white hover:bg-white/10"
+                            )}
+                            title={isEditing ? "Opslaan" : "Bewerken"}
+                          >
+                            {isEditing ? <><Check className="w-4 h-4" /> Opslaan</> : <Pencil className="w-4 h-4" />}
+                          </button>
+                        )}
+                        {selectedStepIndex === 2 && !isApproved && !isEditing && (
+                          <button 
+                            onClick={handleApprove}
+                            className="bg-green-600 hover:bg-green-500 text-white px-6 py-2 rounded-lg font-bold transition-all flex items-center gap-2"
+                          >
+                            Goedgekeurd <Check className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                     
-                    {selectedStepIndex === 2 ? (
+                    {isEditing ? (
+                      <textarea
+                        value={editText}
+                        onChange={(e) => setEditText(e.target.value)}
+                        className="w-full h-[500px] bg-black/40 border border-white/10 rounded-xl p-6 text-gray-200 font-mono text-sm focus:outline-none focus:border-orange-500/50 resize-none"
+                        placeholder="Bewerk de tekst hier..."
+                      />
+                    ) : selectedStepIndex === 2 ? (
                       (() => {
                         const content = stepData[selectedStepIndex];
                         const sections = splitGeneratedContent(content);
                         if (!sections) {
                           return (
-                            <div className="prose prose-invert max-w-none prose-orange bg-black/30 rounded-xl p-6 border border-white/5">
+                            <div className="prose prose-invert max-w-none prose-orange bg-black/30 rounded-xl p-6 border border-white/5 whitespace-pre-wrap">
                               <ReactMarkdown>{content}</ReactMarkdown>
                             </div>
                           );
                         }
 
-                        const activeText = selectedPlatform === 'youtube' ? sections.youtube : sections.spotify;
+                        const activeText = selectedPlatform === 'youtube' 
+                          ? sections.youtube 
+                          : selectedPlatform === 'spotify' 
+                            ? sections.spotify 
+                            : sections.website;
 
                         return (
                           <div className="bg-black/30 rounded-xl border border-white/5 overflow-hidden">
@@ -597,6 +715,18 @@ export default function App() {
                                 >
                                   <Music className="w-4 h-4" /> Spotify
                                 </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedPlatform('website')}
+                                  className={cn(
+                                    "px-3 py-2 rounded-lg border text-xs font-mono uppercase tracking-widest transition-all flex items-center gap-2",
+                                    selectedPlatform === 'website'
+                                      ? "bg-orange-600 border-orange-600 text-white"
+                                      : "bg-white/5 border-white/10 text-white/50 hover:text-white"
+                                  )}
+                                >
+                                  <Globe className="w-4 h-4" /> Website
+                                </button>
                               </div>
                               <button
                                 type="button"
@@ -612,7 +742,7 @@ export default function App() {
                                 const parts = activeText.split(/###\s+(.*)/g);
                                 if (parts.length <= 1) {
                                   return (
-                                    <div className="prose prose-invert max-w-none prose-orange">
+                                    <div className="prose prose-invert max-w-none prose-orange whitespace-pre-wrap">
                                       <ReactMarkdown>{activeText}</ReactMarkdown>
                                     </div>
                                   );
@@ -639,7 +769,7 @@ export default function App() {
                                         {copiedPlatform === `${selectedPlatform}-${idx}` ? "Gekopieerd" : "Kopieer"}
                                       </button>
                                     </div>
-                                    <div className="prose prose-invert max-w-none prose-orange prose-sm">
+                                    <div className="prose prose-invert max-w-none prose-orange prose-sm whitespace-pre-wrap">
                                       <ReactMarkdown>{section.content}</ReactMarkdown>
                                     </div>
                                   </div>
