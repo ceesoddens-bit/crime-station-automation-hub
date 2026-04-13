@@ -5,6 +5,7 @@ dotenv.config();
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
+import { google } from "googleapis";
 import ffmpeg from "fluent-ffmpeg";
 import fs from "fs";
 import net from "net";
@@ -23,10 +24,27 @@ if (fs.existsSync(localFfmpeg)) {
   ffmpeg.setFfmpegPath(localFfmpeg);
 }
 
+// Utility to retry promises with exponential backoff on transient errors
+async function withRetry<T>(fn: () => Promise<T>, retries = 3, delayMs = 2000): Promise<T> {
+  let attempt = 0;
+  while (attempt < retries) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      attempt++;
+      console.warn(`[Retry] Attempt ${attempt} failed: ${error.message || error}`);
+      if (attempt >= retries) throw error;
+      // Wait before retrying (exponential backoff)
+      await new Promise((res) => setTimeout(res, delayMs * Math.pow(2, attempt - 1)));
+    }
+  }
+  return fn(); // Fallback that should never be reached
+}
+
 async function startServer() {
   const app = express();
   const HOST = "0.0.0.0";
-  const desiredPort = 3000;
+  const desiredPort = 3001;
   const desiredHmrPort = 24678;
 
   app.use(express.json());
@@ -52,6 +70,45 @@ async function startServer() {
 
   const dataDir = path.join(process.cwd(), "data");
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
+
+  const oauth2Client = new google.auth.OAuth2(
+    process.env.YOUTUBE_CLIENT_ID,
+    process.env.YOUTUBE_CLIENT_SECRET,
+    `${process.env.APP_URL}/oauth2callback`
+  );
+
+  const tokensPath = path.join(dataDir, "youtube_token.json");
+  if (fs.existsSync(tokensPath)) {
+    try {
+      const tokens = JSON.parse(fs.readFileSync(tokensPath, 'utf8'));
+      oauth2Client.setCredentials(tokens);
+    } catch(e) {}
+  }
+
+  app.get("/api/auth/youtube", (req, res) => {
+    const url = oauth2Client.generateAuthUrl({
+      access_type: "offline",
+      scope: ["https://www.googleapis.com/auth/youtube.upload"],
+      prompt: 'consent'
+    });
+    res.redirect(url);
+  });
+
+  app.get("/api/auth/youtube/status", (req, res) => {
+    res.json({ linked: fs.existsSync(tokensPath) });
+  });
+
+  app.get("/oauth2callback", async (req, res) => {
+    const code = req.query.code;
+    try {
+      const { tokens } = await oauth2Client.getToken(code as string);
+      oauth2Client.setCredentials(tokens);
+      fs.writeFileSync(tokensPath, JSON.stringify(tokens));
+      res.send("<h1>Succesvol gekoppeld!</h1><p>Je kunt dit venster sluiten en teruggaan naar de Crime Station Hub.</p><script>setTimeout(() => window.close(), 3000)</script>");
+    } catch (e: any) {
+      res.status(500).send("Fout tijdens koppeling: " + e.message);
+    }
+  });
 
   app.post("/api/process", upload.single('videoFile'), async (req, res) => {
     const { series, host1, host2, guest, episodeNumber } = req.body;
@@ -85,16 +142,16 @@ async function startServer() {
       // Using Base64 (inlineData) as in the original working version
       const audioData = fs.readFileSync(audioOutput).toString("base64");
       
-      const transcriptionResponse = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+      const transcriptionResponse = await withRetry(() => ai.models.generateContent({
+        model: "gemini-2.5-flash-lite",
         contents: [{ 
           role: 'user', 
           parts: [
             { inlineData: { data: audioData, mimeType: "audio/mp3" } },
-            { text: "Transcribeer deze audio van een Crime Station aflevering nauwkeurig. Behoud tijdcodes." }
+            { text: "Transcribeer deze audio van een Crime Station aflevering nauwkeurig. Gebruik schone, leesbare tijdcodes in het formaat [HH:MM:SS] voor elk nieuw tekstblok. Behoud alle sprekers (Spreker 1, Spreker 2, etc.)." }
           ] 
         }]
-      });
+      }));
 
       const transcription = transcriptionResponse.text;
       if (!transcription) throw new Error("Transcriptie mislukt.");
@@ -103,19 +160,15 @@ async function startServer() {
       // Step 3: Tekstgeneratie
       console.log(`[${requestId}] Starting Step 3: Text Generation`);
       const guestLine = guest ? `Gast: ${guest}` : "Gast: (geen)";
-      
-      const promptText = `
-Je bent de Crime Station Publicatie-agent. Je ontvangt een transcriptie van een aflevering en genereert daarvoor een titel en beschrijvingen voor YouTube, Spotify en crimestation.nl.
+            const promptText = `
+Je bent de Crime Station Publicatie-agent. Je ontvangt een transcriptie van een aflevering en genereert daarvoor geoptimaliseerde content voor YouTube en Spotify. (Website teksten zijn tijdelijk op non-actief gezet).
 
 De volgende informatie wordt automatisch meegegeven vanuit de Content Hub UI — je hoeft hier niet naar te vragen:
-
 - **Serie**: ${series}
 - **Afleveringsnummer**: ${episodeNumber}
 - **Presentator 1**: ${host1}
 - **Presentator 2**: ${host2}
 - **Naam gast**: ${guestLine}
-
-De transcriptie is al beschikbaar. Je start direct met stap 1.
 
 ---
 [TRANSCRIPTIE BEGIN]
@@ -125,241 +178,116 @@ ${transcription}
 
 ## Stap 1: Analyseer de transcriptie
 
-Stel het volgende vast:
+Stel het volgende vast (bewaar dit intern voor jezelf):
+- De 3–5 sterkste zoektermen
+- De rode draad en de meest indrukwekkende 'hook' of spoiler
+- Alle belangrijke feiten, namen en theorieën
 
-- De hoofdonderwerpen in volgorde van bespreking
-- Namen van personen, zaken, misdaadtypes en actuele thema's
-- De rode draad: wat is de kern van deze aflevering?
-- De 3–5 sterkste zoektermen op basis van de inhoud
-- Geschatte tijdsduur per onderwerp op basis van de lengte van de transcriptie
+## Stap 2: Tekstgeneratie (YouTube & Spotify Strategie)
 
----
+Genereer de titels, beschrijvingen en shownotes op basis van de transcriptie. Omdat YouTube en Spotify fundamenteel anders werken, moet je twee aparte, uniek geoptimaliseerde versies maken. Baseer je strikt op deze regels:
 
-## Stap 2: YouTube SEO-analyse
+**Algemene Grammatica Regel (Zeer belangrijk)**:
+- Gebruik voor beide platformen normale Nederlandse hoofdletterregels. Gebruik GEEN 'Title Case' in de titels (dus niet elk woord met een hoofdletter). Alleen het eerste woord en eigennamen krijgen een hoofdletter.
 
-Zoek via web search op de 3–5 zoektermen uit stap 1 naar vergelijkbare Nederlandse true crime video's op YouTube. Analyseer:
+### Deel A: YouTube Optimalisatie (Focus: Click-Through Rate & Brand Safety)
 
-- Welke titelformules goed scoren (structuur, lengte, woordkeuze)
-- Welke hashtags veelvuldig voorkomen bij goed scorende video's
-- Welke zoektermen organisch terugkomen in beschrijvingen
+- **Titel**: Schrijf een spannende titel (curiosity gap). Maximaal 60-65 tekens. Gebruik NOOIT de serienaam of gastnaam. Gebruik brand-safe synoniemen in plaats van woorden die demonetization veroorzaken (bijv. 'fatale afloop' i.p.v. moord).
+- **Beschrijving (250 - 400 woorden)**:
+  - **Hook & Body**: Begin met een dwingende samenvatting (150 tekens) en duik daarna dieper in de feiten met relevante zoektermen. Vermeld de gast kort in de lopende tekst.
+  - **Tijdstempels (Cruciaal voor Chapters)**: Genereer minimaal 3 tijdstempels (minimaal 10 sec uit elkaar). Formatteer strikt als M:SS Beschrijving (GEEN opsommingstekens of haakjes). Start altijd exact op een nieuwe regel met 0:00 Introductie.
+  - **Hashtags**: Zet helemaal onderaan maximaal 3 tot 5 relevante hashtags (incl. #CrimeStation).
 
-Gebruik deze inzichten bij het schrijven van de titel, beschrijvingen en hashtags.
+### Deel B: Spotify Optimalisatie (Focus: Zoekbaarheid, Structuur & Audio)
 
----
+- **Titel**: Hanteer deze strikte, feitelijke structuur: [Naam van de Serie]: [Het concrete onderwerp/de zaak].
+- **Beschrijving / Shownotes (150 - 250 woorden)**:
+  - Begin met een feitelijke, inhoudelijke samenvatting (absoluut geen clickbait).
+  - Zet de naam en expertise van de gast (indien aanwezig) prominent in de tekst.
+  - **Tijdstempels**: Neem de strikt geformatteerde tijdstempels exact over van de YouTube-versie.
+  - **Geen Hashtags**: Gebruik geen hashtags in de Spotify tekst.
 
-## Stap 3: Schrijf de output
+### Deel C: Dynamische Call to Action (Kies op basis van de Serie & Inhoud)
 
-### A. TITEL
+Je moet de juiste CTA kiezen afhankelijk van de serie en de inhoud. Kopieer en plak de exacte tekst.
 
-De titel is identiek voor YouTube, Spotify én de website.
+Scenario A: Zaak-gedreven (Crime Report, Cold Cases, Daily Wely, Schoffies)
 
-| Serie | Structuur |
-|---|---|
-| Crime Insight | \`Crime Insight: [onderwerp of prikkelende stelling]\` |
-| Crime Report | \`Crime Report: [onderwerp]\` |
-| Cold Cases: Never Give Up | \`Cold Cases: Never Give Up: [naam slachtoffer of zaaknaam]\` |
-| Schoffies | \`Schoffies: [concreet onderwerp jeugdcriminaliteit]\` |
-| Crime Business | \`Crime Business: [onderwerp]\` |
-| Daily Wely | \`Daily Wely: [onderwerp of nieuwsitem]\` |
-| Online Security | \`Online Security: [onderwerp]\` |
+Voor YouTube:
+Heb jij een tip over een zaak?
+Meld het bij mick@crimestation.nl of anoniem via Meld Misdaad Anoniem: 0800-7000.
 
-**Regels:**
-- Title case: \`Crime Insight\`, niet \`CRIME INSIGHT\`
-- Scheidingsteken: altijd dubbele punt (:)
-- Lengte: 50–80 tekens
-- Geen datum, afleveringsnummer of emoji
-- Minimaal 1 zoekbaar trefwoord — gebruik de inzichten uit stap 2
-- Kies bij meerdere onderwerpen het sterkste als hoofdonderwerp
+• Abonneer je en klik op de bel voor nieuwe afleveringen.
+• Luister deze podcast op Spotify: [link naar aflevering]
+• Meer misdaadnieuws: www.crimestation.nl
 
----
+Voor Spotify:
+Heb jij een tip over een zaak?
+Meld het bij mick@crimestation.nl of anoniem via Meld Misdaad Anoniem: 0800-7000.
 
-### B. SCHRIJFSTIJL — verplicht voor alle beschrijvingen
+Volg deze podcast om geen aflevering te missen.
+Meer misdaadnieuws: www.crimestation.nl
 
-Schrijf als een onderzoeksjournalist. Laat de feiten de spanning creëren. De beschrijving moet lezen als het begin van een verhaal dat je wilt afmaken.
+Scenario B: Crime Insight (Q&A / Discussie)
+Voeg hierbij in de beschrijving áltijd "🎙️ Met Mick van Wely, Nancy Dekens & [Gastnaam]" toe.
 
-**De eerste zin is altijd de haak. Die begint altijd met de zaak — nooit met een presentator, nooit met de serienaam.**
+Voor YouTube:
+Heb je zelf een vraag voor Mick, Nancy of onze gasten? Mail naar mick@crimestation.nl.
 
-**Wel:**
-- Korte, directe zinnen
-- Actieve vorm: "De politie arresteerde…", niet "Er werd gearresteerd…"
-- Concrete details: namen, locaties, tijdsperiodes, feiten
-- Respectvol naar slachtoffers en nabestaanden
-- Presentatoren of gasten mogen genoemd worden, maar pas ná de haak — en alleen als hun expertise relevant is
+• Abonneer je voor wekelijkse reportages en rechtbankverslagen.
+• Luister deze podcast op Spotify: [link naar aflevering]
+• Meer misdaadnieuws: www.crimestation.nl
 
-**Verboden — deze zinnen en patronen zijn niet toegestaan:**
-- "Welkom bij…", "In deze aflevering…", "Een nieuwe aflevering van…" — ook niet in de tweede of derde zin
-- "duiken diep in", "verkennen de complexiteit van", "gaan we het hebben over"
-- "deelt haar expertise", "legt uit hoe", "bespreekt de juridische nuances"
-- Brugzinnen: "wat ons brengt bij…", "en dat brengt ons bij…"
-- "werpt een schril licht op", "breekt open", "komt aan het licht", "onthult"
-- Retorische vragen als haak
-- Vage beloftes: "je gelooft niet wat er dan gebeurt"
-- Holle marketingtaal: "must-see", "niet te missen"
-- Sensationele bijvoeglijke naamwoorden tenzij ze feitelijk kloppen
+Voor Spotify:
+Heb je zelf een vraag voor Mick, Nancy of onze gasten? Mail naar mick@crimestation.nl.
 
-**Gastinfo:**
-Gastinfo is alleen van toepassing op externe gasten — mensen die niet tot de vaste presentatoren van de show behoren. Vaste co-hosts en presentatoren zijn geen gasten. Als er geen externe gast is, vervalt het gastinfo-blok volledig.
+Volg deze podcast op Spotify om geen aflevering te missen.
+Meer misdaadnieuws: www.crimestation.nl
 
----
+(Als de Crime Insight aflevering géén vragen beantwoordt, verander je de eerste zin van de CTA in beide kanalen naar: "Wat vind jij van deze discussie? Praat mee in de reacties of mail naar mick@crimestation.nl.")
 
-### C. YOUTUBE-BESCHRIJVING
+### Deel D: Verborgen YouTube Tags
+Genereer naast de beschrijving ook een aparte lijst met 10 zeer relevante steekwoorden voor het verborgen 'Tags'-veld in YouTube.
+CRUCIAAL: Scheid de woorden uitsluitend met een komma en gebruik NOOIT hashtags (#). (Bijvoorbeeld: hoornse taartzaak, gifmoord, nancy dekkers, mick van wely, strafrecht).
 
-**Lengte:** 200–400 woorden
-**Eerste twee regels:** zichtbaar zonder klikken — overtuig de kijker in twee zinnen om 45 minuten te investeren
+### Deel E: Zichtbare YouTube Hashtags
+Hashtags in Beschrijving: Genereer aan het eind van de YouTube-beschrijving, dus ónder de volledige Call to Action uit Deel C, exact drie relevante hashtags.
+- Format: Gebruik hiervoor verplicht het # symbool (bijv. #CrimeStation #Zaaknaam #Misdaad).
+- Locatie: Deze hashtags moeten als platte tekst in de beschrijving blijven staan, zodat ze zichtbaar zijn voor de kijker.
+- Onderscheid: Verwar deze drie hashtags niet met de komma-gescheiden lijst voor de verborgen YouTube-tags uit Deel D; dit zijn twee aparte instructies.
 
-**Wat YouTube anders maakt dan Spotify en Website:**
-- Meer ruimte voor context en achtergrond
-- Tijdstempels zijn verplicht — YouTube-kijkers navigeren door de video
-- Eindigt met links en een abonneer-CTA
-- Hashtags staan onderaan de beschrijving
+## Stap 3: Goedkeuring (Artifact Generatie)
 
-**Structuur:**
+Belangrijke Systeeminformatie: De "Pauze" en de "Goedkeuring" worden veilig door de interface van de applicatie zelf afgehandeld! Het frontend systeem toont jouw output en wacht op expliciete goedkeuring om te publiceren.
+Om ervoor te zorgen dat de Publish API jouw gegenereerde data herkent: Je output MOET een valid JSON frame zijn. Vul de data exact in dit format in!
 
-\`\`\`
-[Haak — max 2 zinnen, begint met de zaak]
-
-[Samenvatting — 3 tot 5 zinnen met concrete details, namen en zoektermen]
-
-[Tijdstempels — verplicht]
-0:00 Introductie
-0:00 [Onderwerp 1]
-0:00 [Onderwerp 2]
-Eerste stempel is altijd 0:00.
-Tijdstempels zijn schattingen op basis van de transcriptie — controleer voor publicatie.
-
-[Gastinfo — alleen bij externe gast]
-Naam en expertise in één zin.
-
-[Links]
-Meer Crime Station: https://crimestation.nl
-Luister op Spotify: [link]
-
-[CTA]
-Abonneer je op dit kanaal en zet de bel aan.
-
-[Hashtags]
-Maximaal 3–5 hashtags op basis van de SEO-analyse uit stap 2.
-\`\`\`
-
----
-
-### D. SPOTIFY-BESCHRIJVING
-
-**Lengte:** 150–250 woorden
-**Eerste zin:** maximaal 120 tekens — dit is het enige dat de luisteraar ziet zonder te klikken
-
-**Wat Spotify anders maakt dan YouTube en Website:**
-- Compacter en strakker — elke zin moet zijn gewicht dragen
-- Geen tijdstempels — Spotify heeft geen hoofdstuknavigatie
-- Geen abonneer-CTA — wel een verwijzing naar crimestation.nl
-- De haak is één zin die al het werk doet
-- Geen herhaling van informatie die al in de YouTube-beschrijving staat — schrijf de Spotify-tekst opnieuw, niet als samenvatting van YouTube
-
-**Structuur:**
-
-\`\`\`
-[Haak — 1 zin, begint met de zaak, max 120 tekens]
-
-[Samenvatting — 2 tot 4 zinnen]
-Compact. Alleen de kern. Geen tijdstempels.
-
-[Gastinfo — alleen bij externe gast]
-Naam en expertise in één zin.
-
-[CTA]
-Meer weten? Ga naar crimestation.nl | Tips? Mail lid@crimestation.nl
-\`\`\`
-
----
-
-### E. WEBSITE-BESCHRIJVING
-
-**Lengte:** 300–500 woorden
-**Doel:** SEO — geschreven voor de lezer die via Google komt
-
-**Wat Website anders maakt dan YouTube en Spotify:**
-- Uitgebreider — meer achtergrond, context en duiding dan de andere platforms
-- Geen tijdstempels
-- Zoektermen organisch verwerken voor Google-vindbaarheid
-- Geen abonneer-CTA — wel verwijzing naar Crime Station
-- Schrijf de websitetekst opnieuw vanuit het perspectief van een lezer, niet als kopie van YouTube of Spotify
-
-**Structuur:**
-
-\`\`\`
-[Lead — 2 tot 4 zinnen, begint met de zaak]
-
-[Context — 3 tot 6 zinnen]
-Achtergrondinformatie bij de zaak of het thema. Wie zijn de betrokkenen?
-Tijdsperiode, locatie, juridische context. Zoektermen organisch verwerken.
-
-[Gastinfo — alleen bij externe gast]
-Naam, expertise en relevantie voor deze aflevering. Één tot twee zinnen.
-
-[CTA]
-Abonneer je op Crime Station | Tips? Mail lid@crimestation.nl
-\`\`\`
-
-**SEO:**
-- SEO-titel: \`[Afleveringstitel] | Crime Station\` — max 60 tekens
-- URL-slug: kernwoorden met koppeltekens, bijv. \`crimestation.nl/crime-report-tabaksmaffia-nederland\`
-- Meta description: max 155 tekens, pakkend en met zoektermen
-
----
-
-## Stap 4: Zelfcontrole — verplicht voor publicatie
-
-Voordat je de output presenteert, toets je elke zin van elke beschrijving aan deze drie vragen:
-
-1. Bevat deze zin een concreet feit, naam, locatie of tijdsperiode?
-2. Staat er een verboden patroon in? (zie de lijst onder schrijfstijl)
-3. Kan ik deze zin schrappen zonder dat de lezer informatie mist?
-
-Als vraag 2 of 3 "ja" is: herschrijf of schrap de zin. Pas daarna ga je naar stap 5.
-
----
-
-## Stap 5: Presenteer de output
-
-**De output bestaat uitsluitend uit het onderstaande JSON-blok. Geen inleidende tekst, geen uitleg, geen proza daaromheen. Alleen het JSON-blok.**
-
-De UI leest dit JSON-blok en toont per tab de titel en beschrijving. Als de output geen geldig JSON-blok is, werkt de UI niet.
-
-Hieronder staat een ingevuld voorbeeldformaat. Vervang alle waarden door de daadwerkelijke gegenereerde content:
+**De output MAAK JE EXACT ALS DIT JSON FORMAT (Gebruik NOOIT markdown tabellen, geef puur het JSON object terug):**
 
 \`\`\`json
 {
   "youtube": {
-    "titel": "Crime Insight: Gifmoorden en de Hoornse Taartzaak",
-    "beschrijving": "Een 40-jarige vrouw uit Dirkshoorn werd aangehouden na de verdachte dood van haar 59-jarige echtgenoot. De politie onderzoekt vergiftiging.\\n\\nIn 1910 overleed een vrouw door een vergiftigde taart die bedoeld was voor haar man. Het arrest in de Hoornse Taartzaak legde de basis voor voorwaardelijke opzet in het Nederlandse strafrecht — een principe dat tot op de dag van vandaag wordt toegepast. Strafrechtadvocaat Nancy Dekens legt uit waarom gifmoorden zo moeilijk te bewijzen zijn en bespreekt spraakmakende zaken uit heden en verleden. Ook kort aandacht voor de vervolging van een voormalige pleegvader in jeugdzorgdorp De Glind.\\n\\n0:00 Introductie\\n1:30 De zaak Dirkshoorn\\n4:00 De Hoornse Taartzaak en voorwaardelijke opzet\\n12:00 Andere gifmoorden\\n18:00 Nieuws: De Glind\\n\\nMeer Crime Station: https://crimestation.nl\\nLuister op Spotify: [link]\\n\\nAbonneer je op dit kanaal en zet de bel aan.",
-    "hashtags": ["#truecrime", "#crimestation", "#gifmoord", "#strafrecht", "#HoornseTaartzaak"]
+    "titel": "...",
+    "beschrijving": "...",
+    "hashtags": ["#CrimeStation", "..."],
+    "tags": ["hoornse taartzaak", "gifmoord", "strafrecht"]
   },
   "spotify": {
-    "titel": "Crime Insight: Gifmoorden en de Hoornse Taartzaak",
-    "beschrijving": "In Dirkshoorn werd een 40-jarige vrouw aangehouden na de verdachte dood van haar echtgenoot. De politie onderzoekt vergiftiging.\\n\\nEen zaak uit 1910 — waarbij een vergiftigde taart fataal was voor de verkeerde persoon — bepaalt nog steeds hoe Nederlandse rechters oordelen over voorwaardelijke opzet. Strafrechtadvocaat Nancy Dekens legt uit wat gifmoorden juridisch zo complex maakt.\\n\\nMeer weten? Ga naar crimestation.nl | Tips? Mail lid@crimestation.nl",
-    "hashtags": ["#truecrime", "#crimestation", "#gifmoord", "#strafrecht", "#HoornseTaartzaak"]
-  },
-  "website": {
-    "titel": "Crime Insight: Gifmoorden en de Hoornse Taartzaak",
-    "beschrijving": "Een 40-jarige vrouw uit Dirkshoorn werd in maart 2025 aangehouden op verdenking van de dood van haar 59-jarige echtgenoot. De politie onderzoekt of vergiftiging een rol heeft gespeeld. De zaak zette gifmoorden opnieuw op de agenda — een misdrijf dat al eeuwenlang voorkomt en nog steeds moeilijk te bewijzen is.\\n\\nEen van de meest spraakmakende gifmoorden uit de Nederlandse geschiedenis is de Hoornse Taartzaak uit 1910. Een man probeerde zijn vrouw te vergiftigen via een taart, maar het verkeerde slachtoffer overleed. De Hoge Raad deed in die zaak een baanbrekende uitspraak over voorwaardelijke opzet: wie bewust de aanmerkelijke kans aanvaardt dat zijn handelen iemand doodt, is schuldig aan doodslag. Dit principe vormt tot op de dag van vandaag de basis van talloze strafzaken.\\n\\nStrafrechtadvocaat Nancy Dekens bespreekt de juridische complexiteit van vergiftigingszaken: hoe bewijs je dat iemand opzettelijk heeft vergiftigd, welke middelen worden gebruikt en hoe zijn daders doorgaans in beeld gekomen?\\n\\nDaarnaast is er aandacht voor een actueel nieuwsbericht: het Openbaar Ministerie Oost-Nederland vervolgt een voormalige pleegvader uit jeugdzorgdorp De Glind wegens misbruik uit 1992.\\n\\nAbonneer je op Crime Station | Tips? Mail lid@crimestation.nl",
-    "seo_titel": "Crime Insight: Gifmoorden en de Hoornse Taartzaak | Crime Station",
-    "url_slug": "crimestation.nl/crime-insight-gifmoorden-hoornse-taartzaak",
-    "meta_description": "Een vrouw aangehouden na de dood van haar echtgenoot. Gifmoorden, de Hoornse Taartzaak uit 1910 en voorwaardelijke opzet — met strafrechtadvocaat Nancy Dekens."
+    "titel": "...",
+    "beschrijving": "..."
   }
 }
 \`\`\`
+(De website teksten laat je voor nu weg)
+`;
 
-Genereer op basis van dit formaat de daadwerkelijke output voor de aflevering. Vul alle velden volledig in. Geen lege strings, geen placeholders. Regelafbrekingen zijn \\n.
-      `;
-
-      const genResponse = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+      const genResponse = await withRetry(() => ai.models.generateContent({
+        model: "gemini-2.5-flash-lite",
         contents: [{ role: "user", parts: [{ text: promptText }] }],
         config: {
           temperature: 0.7,
           tools: [{ googleSearch: {} }]
         }
-      });
+      }));
 
       let generatedContent = genResponse.text;
       const jsonMatch = generatedContent.match(/\{[\s\S]*\}/);
@@ -369,10 +297,12 @@ Genereer op basis van dit formaat de daadwerkelijke output voor de aflevering. V
 
       // Step 4: Creating Artifact
       fs.writeFileSync(path.join(dataDir, "concept.json"), artifactContent || "");
+      fs.writeFileSync(path.join(dataDir, `meta_${requestId}.json`), JSON.stringify({ videoPath: sourceFile }));
 
       res.json({ 
         status: "waiting_approval", 
         data: {
+          requestId: requestId,
           artifact: artifactContent,
           transcription: transcription
         }
@@ -383,8 +313,45 @@ Genereer op basis van dit formaat de daadwerkelijke output voor de aflevering. V
     }
   });
 
-  app.post("/api/approve", async (req, res) => {
-    res.json({ status: "completed", links: { youtube: "mock", spotify: "mock" } });
+  app.post("/api/publish/youtube", async (req, res) => {
+    try {
+      const { requestId, youtube } = req.body;
+      if (!requestId) throw new Error("Geen requestId meegegeven.");
+      
+      const metaFile = path.join(dataDir, `meta_${requestId}.json`);
+      if (!fs.existsSync(metaFile)) throw new Error("Video metadata niet gevonden. (Start het proces opnieuw)");
+      
+      const { videoPath } = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+      if (!fs.existsSync(videoPath)) throw new Error("Originele videobestand is niet meer beschikbaar.");
+      
+      const youtubeApi = google.youtube('v3');
+      const tags = typeof youtube?.tags === 'string' ? youtube.tags.split(',').map((t: string) => t.trim()) : (Array.isArray(youtube?.tags) ? youtube.tags : []);
+      
+      const response = await youtubeApi.videos.insert({
+        auth: oauth2Client,
+        part: ['snippet', 'status'],
+        requestBody: {
+          snippet: {
+            title: youtube?.titel ? youtube.titel.slice(0, 100) : "Crime Station Aflevering",
+            description: youtube?.beschrijving || "",
+            tags: tags,
+            categoryId: "25", // 25 = News & Politics
+            defaultLanguage: 'nl',
+            defaultAudioLanguage: 'nl'
+          },
+          status: { 
+            privacyStatus: 'private',
+            selfDeclaredMadeForKids: false
+          }
+        },
+        media: { body: fs.createReadStream(videoPath) }
+      });
+      
+      res.json({ status: "completed", links: { youtube: `https://youtube.com/watch?v=${response.data.id}` } });
+    } catch (error: any) {
+      console.error("Publish error:", error);
+      res.status(500).json({ error: error.message || "Failed to publish" });
+    }
   });
 
   if (process.env.NODE_ENV !== "production") {
