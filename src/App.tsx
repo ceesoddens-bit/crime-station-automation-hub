@@ -58,6 +58,8 @@ export default function App() {
   const [copiedPlatform, setCopiedPlatform] = useState<null | string>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState('');
+  const [currentRequestId, setCurrentRequestId] = useState('');
+  const [isYoutubeLinked, setIsYoutubeLinked] = useState(false);
 
   // Load state from localStorage on mount
   useEffect(() => {
@@ -79,6 +81,7 @@ export default function App() {
         setIsApproved(parsed.isApproved || false);
         setPublishLinks(parsed.publishLinks || null);
         setSelectedPlatform(parsed.selectedPlatform === 'spotify' ? 'spotify' : 'youtube');
+        setCurrentRequestId(parsed.currentRequestId || '');
       } catch (e) {
         console.error("Failed to load saved state", e);
       }
@@ -88,6 +91,17 @@ export default function App() {
   useEffect(() => {
     const savedLastGuest = localStorage.getItem('crime-station-last-guest');
     if (savedLastGuest) setLastGuest(savedLastGuest);
+  }, []);
+
+  useEffect(() => {
+    const checkAuthStatus = () => {
+      axios.get('/api/auth/youtube/status')
+        .then(res => setIsYoutubeLinked(!!res.data?.linked))
+        .catch(e => console.error("Could not check youtube auth status", e));
+    };
+    checkAuthStatus();
+    window.addEventListener('focus', checkAuthStatus);
+    return () => window.removeEventListener('focus', checkAuthStatus);
   }, []);
 
   useEffect(() => {
@@ -113,8 +127,9 @@ export default function App() {
       isApproved,
       publishLinks,
       selectedPlatform,
+      currentRequestId,
     }));
-  }, [videoSource, driveUrl, series, host1, host2, guest, episodeNumber, isStarted, currentStep, selectedStepIndex, stepData, isApproved, publishLinks, selectedPlatform]);
+  }, [videoSource, driveUrl, series, host1, host2, guest, episodeNumber, isStarted, currentStep, selectedStepIndex, stepData, isApproved, publishLinks, selectedPlatform, currentRequestId]);
 
   // Sync steps statuses with current progress when restoring or updating
   useEffect(() => {
@@ -176,6 +191,7 @@ export default function App() {
           1: data.data?.transcription || "Geen transcriptie beschikbaar.",
           2: data.data?.artifact
         });
+        setCurrentRequestId(data.data?.requestId || '');
         setSelectedStepIndex(2); // Laat de gegenereerde tekst standaard zien
         setSelectedPlatform('youtube');
         updateStepStatus(3, 'waiting');
@@ -210,7 +226,26 @@ export default function App() {
     updateStepStatus(4, 'processing');
     
     try {
-      const response = await axios.post('/api/approve', { approved: true });
+      let payload: any = { approved: true, requestId: currentRequestId };
+      try {
+        const content = stepData[2] || (isEditing ? editText : '');
+        let jsonStr = content;
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) jsonStr = jsonMatch[0];
+        
+        const cleanedJson = jsonStr.replace(/: "(.*?)",/gs, (match, p1) => {
+          return `: "${p1.replace(/\n/g, '\\n')}",`;
+        }).replace(/: "(.*?)"\n?}/gs, (match, p1) => {
+          return `: "${p1.replace(/\n/g, '\\n')}"}`;
+        });
+        
+        const parsed = JSON.parse(cleanedJson);
+        if (parsed.youtube) payload.youtube = parsed.youtube;
+      } catch (e) {
+        console.error("Could not parse json content for approval, sending defaults");
+      }
+
+      const response = await axios.post('/api/publish/youtube', payload);
       const data = response.data;
       
       if (data.status === 'completed') {
@@ -358,6 +393,17 @@ export default function App() {
           <p className="text-gray-400 max-w-xl text-lg">
             Autonome verwerking van video naar podcast en SEO-geoptimaliseerde content.
           </p>
+          <div className="mt-4 flex">
+            {isYoutubeLinked ? (
+              <div className="text-xs font-mono uppercase bg-green-600/20 text-green-500 border border-green-500/30 px-3 py-1.5 rounded flex items-center gap-2">
+                <Check className="w-3 h-3" /> YouTube Gekoppeld
+              </div>
+            ) : (
+              <a href="/api/auth/youtube" target="_blank" rel="noopener noreferrer" className="text-xs font-mono uppercase bg-red-600/20 text-red-500 border border-red-500/30 px-3 py-1.5 rounded flex items-center gap-2 hover:bg-red-600/40 transition-colors">
+                <Youtube className="w-3 h-3" /> Koppel YouTube Account (Eenmalig)
+              </a>
+            )}
+          </div>
         </header>
 
         {!isStarted ? (
