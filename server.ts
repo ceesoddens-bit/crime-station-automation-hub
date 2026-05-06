@@ -4,7 +4,6 @@ dotenv.config();
 
 import express from "express";
 import session from "express-session";
-import cookieParser from "cookie-parser";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { google } from "googleapis";
@@ -350,7 +349,6 @@ async function startServer() {
   const desiredPort = 3001;
   const desiredHmrPort = 24678;
 
-  app.use(cookieParser());
   app.use(express.json());
   app.use(session({
     secret: process.env.SESSION_SECRET || "fallback-secret",
@@ -361,7 +359,7 @@ async function startServer() {
 
   // Auth middleware — beschermt alle /api routes behalve login/logout/status
   const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const publicPaths = ['/api/auth/login', '/api/auth/logout', '/api/auth/me', '/api/auth/youtube', '/api/auth/youtube/status', '/oauth2callback'];
+    const publicPaths = ['/auth/login', '/auth/logout', '/auth/me', '/auth/youtube'];
     if (publicPaths.some(p => req.path.startsWith(p))) return next();
     if (req.session?.loggedIn) return next();
     res.status(401).json({ error: "Niet ingelogd" });
@@ -371,9 +369,12 @@ async function startServer() {
   // Login
   app.post('/api/auth/login', (req, res) => {
     const { username, password } = req.body;
-    const validUser = process.env.ADMIN_USERNAME || 'admin';
-    const validPass = process.env.ADMIN_PASSWORD || 'crimestation2026';
-    if (username === validUser && password === validPass) {
+    const accounts = [
+      { username: process.env.ADMIN_USERNAME || 'admin', password: process.env.ADMIN_PASSWORD || 'crimestation2026' },
+      { username: process.env.USER2_USERNAME || '', password: process.env.USER2_PASSWORD || '' },
+    ];
+    const match = accounts.find(a => a.username && username === a.username && password === a.password);
+    if (match) {
       req.session.loggedIn = true;
       req.session.username = username;
       res.json({ status: 'ok', username });
