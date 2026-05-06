@@ -41,6 +41,253 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 3, delayMs = 2000): 
   return fn(); // Fallback that should never be reached
 }
 
+// ---------------------------------------------------------------------------
+// Transcript blokken & hoofdstukken
+// ---------------------------------------------------------------------------
+
+type Segment = { start: number; end: number; text: string; speaker?: string };
+type Block = { id: number; start: number; end: number; text: string };
+type Chapter = { start: number; title: string; block_id: number };
+
+/**
+ * Groepeert segmenten tot blokken van ~targetBlockSecs seconden, en forceert
+ * een break bij pauzes langer dan gapSecs. Elk blok krijgt een id zodat
+ * Gemini naar exacte tijdstippen kan verwijzen zonder te hallucineren.
+ */
+function buildBlocks(segments: Segment[], targetBlockSecs = 60, gapSecs = 3.0): Block[] {
+  const blocks: Block[] = [];
+  let cur: { start: number; end: number; texts: string[] } | null = null;
+
+  const flush = () => {
+    if (!cur) return;
+    blocks.push({
+      id: blocks.length,
+      start: cur.start,
+      end: cur.end,
+      text: cur.texts.join(" ").replace(/\s+/g, " ").trim(),
+    });
+    cur = null;
+  };
+
+  for (const seg of segments) {
+    const text = (seg.text || "").trim();
+    if (!text) continue;
+
+    if (!cur) {
+      cur = { start: seg.start, end: seg.end, texts: [text] };
+      continue;
+    }
+
+    const gap = seg.start - cur.end;
+    const duration = cur.end - cur.start;
+
+    if (gap > gapSecs || duration >= targetBlockSecs) {
+      flush();
+      cur = { start: seg.start, end: seg.end, texts: [text] };
+    } else {
+      cur.end = seg.end;
+      cur.texts.push(text);
+    }
+  }
+  flush();
+  return blocks;
+}
+
+function formatTimestamp(seconds: number): string {
+  const total = Math.floor(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/**
+ * Valideert Gemini's chapter-voorstel: altijd 0:00 Introductie forceren,
+ * min. 60s tussen hoofdstukken, max 12 hoofdstukken, tijdstempels uit blokken.
+ */
+function buildChapterList(
+  rawChapters: Array<{ block_id: number; title: string }> | undefined,
+  blocks: Block[]
+): Chapter[] {
+  if (!Array.isArray(rawChapters) || blocks.length === 0) {
+    return [{ start: 0, title: "Introductie", block_id: 0 }];
+  }
+
+  const valid: Chapter[] = [];
+  const seenBlocks = new Set<number>();
+
+  for (const ch of rawChapters) {
+    const blockId = Number(ch.block_id);
+    const title = (ch.title || "").toString().trim();
+    if (!title) continue;
+    if (!Number.isFinite(blockId) || blockId < 0 || blockId >= blocks.length) continue;
+    if (seenBlocks.has(blockId)) continue;
+
+    seenBlocks.add(blockId);
+    valid.push({
+      start: blocks[blockId].start,
+      title,
+      block_id: blockId,
+    });
+  }
+
+  valid.sort((a, b) => a.start - b.start);
+
+  // Forceer eerste chapter op 0:00 Introductie
+  if (valid.length === 0 || valid[0].start > 5) {
+    valid.unshift({ start: 0, title: "Introductie", block_id: 0 });
+  } else {
+    valid[0] = { ...valid[0], start: 0 };
+  }
+
+  // Verwijder chapters die te dicht op elkaar zitten (< 60s)
+  const spaced: Chapter[] = [];
+  for (const ch of valid) {
+    if (spaced.length === 0 || ch.start - spaced[spaced.length - 1].start >= 60) {
+      spaced.push(ch);
+    }
+  }
+
+  return spaced.slice(0, 12);
+}
+
+// ---------------------------------------------------------------------------
+// Prompts
+// ---------------------------------------------------------------------------
+
+function buildAnalysisPrompt(opts: {
+  series: string; host1: string; host2: string; guest: string; transcription: string;
+}): string {
+  const isNoGuest = !opts.guest || opts.guest.trim().toLowerCase() === "geen gast";
+  const guestLine = isNoGuest
+    ? "Geen gast — alleen presentatoren aanwezig."
+    : `Gast: ${opts.guest}`;
+
+  return `Je bent een content-analist voor Crime Station, een Nederlandse journalistieke true-crime podcast. Lees het onderstaande transcript grondig en geef een gestructureerde analyse.
+
+Serie: ${opts.series}
+Presentatoren: ${opts.host1}${opts.host2 ? `, ${opts.host2}` : ""}
+${guestLine}
+
+---
+${opts.transcription}
+---
+
+Geef de analyse als gewone tekst (geen JSON, geen markdown headers) met deze onderdelen:
+
+1. KERNCASUS (1 zin): waar gaat deze aflevering écht over?
+2. BETROKKENEN: welke personen, plaatsen, instanties worden genoemd?
+3. NARRATIEVE BOOG (3-5 punten): hoe loopt het gesprek? Van inleiding via opbouw naar climax of reflectie.
+4. INHOUDELIJKE HAAKJES (3-5): concrete, specifieke momenten of onthullingen die een kijker zouden interesseren. Geen clichés — citeer concrete details uit het gesprek.
+5. TOON: serieus/reflectief/onthullend/menselijk? Wat overheerst?
+
+Houd het bondig maar inhoudelijk. Geen sensatietaal.`;
+}
+
+function buildCopyPrompt(opts: {
+  series: string; host1: string; host2: string; guest: string; episodeNumber: string;
+  analysis: string; blocks: Block[];
+}): string {
+  const isNoGuest = !opts.guest || opts.guest.trim().toLowerCase() === "geen gast";
+
+  const blocksText = opts.blocks
+    .map(b => `[${b.id}] (${formatTimestamp(b.start)}) ${b.text.slice(0, 350)}`)
+    .join("\n");
+
+  return `Je bent redacteur voor Crime Station, een Nederlandse journalistieke true-crime podcast. Je schrijft titel, beschrijving en hoofdstukindeling voor één aflevering.
+
+CONTEXT
+Serie: ${opts.series}
+Afleveringsnummer: ${opts.episodeNumber}
+Presentatoren: ${opts.host1}${opts.host2 ? `, ${opts.host2}` : ""}
+${isNoGuest ? "Geen gast." : `Gast: ${opts.guest}`}
+
+ANALYSE VAN DEZE AFLEVERING
+${opts.analysis}
+
+BLOKKEN UIT DE AFLEVERING (genummerd, met starttijd en eerste woorden):
+${blocksText}
+
+---
+
+SCHRIJFSTIJL (zeer belangrijk)
+- Journalistiek, integer, respectvol, menselijk. Nuchter Nederlands.
+- Géén sensatiewoorden: vermijd "schokkend", "hartverscheurend", "onthullend", "mysterieus", "geheim", clickbait-constructies ("je gelooft niet wat…"), vraagtekens in titels.
+- Géén Title Case. Alleen hoofdletter bij eerste woord en eigennamen. Gebruik géén emoji's.
+- Brand safety: vervang "moord" door "fataal geweldsdelict", "fataal incident", of "het verlies".
+- Titels zijn concreet en specifiek, niet abstract. Benoem waar het over gaat, niet hoe spannend het is.
+
+TITEL-VOORBEELDEN (juiste toon)
+- "De onzichtbare strijd van nabestaanden"
+- "Wat er misging in het onderzoek naar de zaak-Hoorn"
+- "Waarom deze cold case na dertig jaar weer wordt heropend"
+
+HOOFDSTUKKEN (chapters)
+- Selecteer 5 tot 10 blokken uit de lijst die een nieuw inhoudelijk onderwerp markeren.
+- Gebruik het exacte block_id uit de lijst hierboven — verzin géén tijdstempels.
+- Eerste hoofdstuk is altijd "Introductie" (block_id 0).
+- Titels zijn kort (2-6 woorden), beschrijvend, journalistiek van toon.
+- Hoofdstuktitels volgen de inhoud van dat blok, niet een samenvatting van de hele aflevering.
+
+OUTPUT
+Geef alléén valid JSON terug, exact in dit format:
+
+{
+  "youtube": {
+    "titel": "...",
+    "intro": "Korte openingsalinea van 2-4 zinnen die het onderwerp introduceert — komt bovenaan de beschrijving, vóór de hoofdstukken.",
+    "outro": "Optioneel 1-2 zinnen slot na de hoofdstukken, vóór de CTA.",
+    "hashtags": ["#CrimeStation", "#...", "#..."],
+    "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6", "tag7", "tag8", "tag9", "tag10"]
+  },
+  "spotify": {
+    "titel": "${opts.series}: onderwerp",
+    "beschrijving": "Zelfstandige beschrijving voor Spotify-luisteraars (5-8 zinnen). Geen hoofdstukken — die voegen we later toe. Focus op wat je leert of ervaart tijdens het luisteren."
+  },
+  "chapters": [
+    {"block_id": 0, "title": "Introductie"},
+    {"block_id": 7, "title": "..."},
+    {"block_id": 14, "title": "..."}
+  ]
+}
+
+BELANGRIJK: exact 3 hashtags. Exact 10 tags. Hashtags beginnen met #, tags niet.`;
+}
+
+function composeYoutubeDescription(youtube: any, chapterText: string, guest: string): string {
+  const intro = (youtube?.intro || "").trim();
+  const outro = (youtube?.outro || "").trim();
+  const hashtags = Array.isArray(youtube?.hashtags)
+    ? youtube.hashtags.slice(0, 3).join(" ")
+    : "";
+
+  const cta = `Heb je zelf een vraag voor Mick, Nancy of onze gasten? Mail naar mick@crimestation.nl of laat een reactie achter.
+
+• Abonneer je voor wekelijkse reportages en rechtbankverslagen.
+
+• Luister deze podcast op Spotify: [link]
+
+• Meer misdaadnieuws: www.crimestation.nl`;
+
+  return [intro, chapterText, outro, cta, hashtags]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function composeSpotifyDescription(spotify: any, chapterText: string, guest: string): string {
+  const body = (spotify?.beschrijving || "").trim();
+
+  const cta = `Heb je zelf een vraag voor Mick, Nancy of onze gasten? Mail naar mick@crimestation.nl.
+
+Waardeer je deze aflevering? Geef ons 5 sterren en klik op 'Volgen' om niets te missen.
+
+Meer misdaadnieuws: www.crimestation.nl`;
+
+  return [body, chapterText, cta].filter(Boolean).join("\n\n");
+}
+
+
 async function startServer() {
   const app = express();
   const HOST = "0.0.0.0";
@@ -115,202 +362,185 @@ async function startServer() {
     const uploadedFile = req.file;
     const requestId = Date.now().toString();
     const audioOutput = path.join(dataDir, `audio_${requestId}.mp3`);
+    let currentStep = 0; // 0=compressie, 1=transcriptie, 2=tekstgeneratie
 
     try {
       if (!uploadedFile) throw new Error("Geen bestand geüpload.");
       const sourceFile = uploadedFile.path;
 
-      // Step 1: Compression
-      console.log(`[${requestId}] Starting Step 1: Audio Extraction...`);
+      // Step 1: Audio extractie — altijd naar 16kHz mono MP3 (matches WhisperX input)
+      console.log(`[${requestId}] Starting Step 1: Audio Extraction... (source: ${sourceFile}, size: ${(uploadedFile.size / 1024 / 1024).toFixed(1)}MB)`);
+      currentStep = 0;
+
       await new Promise<void>((resolve, reject) => {
         ffmpeg(sourceFile)
-          .noVideo()
           .audioCodec("libmp3lame")
           .audioBitrate("64k")
           .audioChannels(1)
-          .on("end", () => resolve())
-          .on("error", (err) => reject(err))
+          .audioFrequency(16000)
+          .outputOptions(['-vn'])
+          .on("end", () => { console.log(`[${requestId}] FFmpeg done.`); resolve(); })
+          .on("error", (err: any) => {
+            console.error(`[${requestId}] FFmpeg error:`, err.message);
+            reject(new Error(`Audio extractie mislukt: ${err.message}`));
+          })
           .save(audioOutput);
       });
 
-      // Step 2: Transcription
-      console.log(`[${requestId}] Starting Step 2: Transcription`);
+      // Step 2: Transcription via Whisper agent (path-based, geen upload nodig)
+      console.log(`[${requestId}] Starting Step 2: Transcription via Whisper...`);
+      currentStep = 1;
       const apiKey = process.env.GEMINI_API_KEY;
       if (!apiKey) throw new Error("GEMINI_API_KEY is missing.");
       const ai = new GoogleGenAI({ apiKey });
 
-      // Using Base64 (inlineData) as in the original working version
-      const audioData = fs.readFileSync(audioOutput).toString("base64");
-      
-      const transcriptionResponse = await withRetry(() => ai.models.generateContent({
-        model: "gemini-2.5-flash-lite",
-        contents: [{ 
-          role: 'user', 
-          parts: [
-            { inlineData: { data: audioData, mimeType: "audio/mp3" } },
-            { text: "Transcribeer deze audio van een Crime Station aflevering nauwkeurig. Gebruik schone, leesbare tijdcodes in het formaat [HH:MM:SS] voor elk nieuw tekstblok. Behoud alle sprekers (Spreker 1, Spreker 2, etc.)." }
-          ] 
-        }]
-      }));
+      try {
+        const health = await fetch("http://localhost:8001/health", { signal: AbortSignal.timeout(5000) });
+        if (!health.ok) throw new Error("niet ok");
+      } catch {
+        throw new Error("Whisper agent is niet bereikbaar op localhost:8001. Start de Whisper server eerst.");
+      }
 
-      const transcription = transcriptionResponse.text;
-      if (!transcription) throw new Error("Transcriptie mislukt.");
-      console.log(`[${requestId}] Transcription completed.`);
+      const whisperResp = await fetch("http://localhost:8001/transcribe_path", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: path.resolve(audioOutput),
+          language: "nl",
+          diarize: true,
+          host1: host1 || undefined,
+          host2: host2 || undefined,
+          guest: guest || undefined,
+        }),
+        signal: AbortSignal.timeout(4 * 60 * 60 * 1000), // 4 uur voor lange afleveringen
+      });
+
+      if (!whisperResp.ok) {
+        const errBody = await whisperResp.json().catch(() => ({})) as any;
+        throw new Error(`Whisper fout (${whisperResp.status}): ${errBody.detail || whisperResp.statusText}`);
+      }
+
+      const whisperData = await whisperResp.json() as any;
+      if (whisperData.status !== "success") {
+        throw new Error(`Whisper transcriptie mislukt: ${whisperData.detail || "onbekende fout"}`);
+      }
+
+      const transcription = whisperData.transcription as string;
+      const segments: any[] = whisperData.segments || [];
+      if (!transcription || segments.length === 0) throw new Error("Transcriptie is leeg.");
+
+      // Generate SRT from segments
+      const srtFmt = (s: number) => {
+        const h = Math.floor(s / 3600).toString().padStart(2, "0");
+        const m = Math.floor((s % 3600) / 60).toString().padStart(2, "0");
+        const sec = Math.floor(s % 60).toString().padStart(2, "0");
+        const ms = Math.round((s % 1) * 1000).toString().padStart(3, "0");
+        return `${h}:${m}:${sec},${ms}`;
+      };
+      // SRT zonder sprekernamen — die horen niet in YouTube/Spotify ondertiteling.
+      // Sprekerlabels blijven wel in segments[] voor de DOCX-export.
+      const srtContent = segments.map((seg: any, i: number) => {
+        return `${i + 1}\n${srtFmt(seg.start)} --> ${srtFmt(seg.end)}\n${seg.text?.trim()}\n`;
+      }).join("\n");
+
+      console.log(`[${requestId}] Transcription completed (${segments.length} segmenten).`);
 
       // Step 3: Tekstgeneratie
-      console.log(`[${requestId}] Starting Step 3: Text Generation`);
-      const guestLine = guest ? `Gast: ${guest}` : "Gast: (geen)";
-            const promptText = `
-Je bent de Crime Station Publicatie-agent. Je ontvangt een transcriptie van een aflevering en genereert daarvoor geoptimaliseerde content voor YouTube en Spotify. (Website teksten zijn tijdelijk op non-actief gezet).
+      currentStep = 2;
 
-De volgende informatie wordt automatisch meegegeven vanuit de Content Hub UI — je hoeft hier niet naar te vragen:
-- **Serie**: ${series}
-- **Afleveringsnummer**: ${episodeNumber}
-- **Presentator 1**: ${host1}
-- **Presentator 2**: ${host2}
-- **Naam gast**: ${guestLine}
+      // Step 3a: Segmenten groeperen tot semantische blokken
+      const blocks = buildBlocks(segments, 60, 3.0);
+      console.log(`[${requestId}] ${blocks.length} blokken gebouwd.`);
 
----
-[TRANSCRIPTIE BEGIN]
-${transcription}
-[TRANSCRIPTIE EINDE]
----
+      // Step 3b: Analyse-stap (flash) — begrijp de aflevering eerst
+      const analysisPrompt = buildAnalysisPrompt({ series, host1, host2, guest, transcription });
+      console.log(`[${requestId}] Running analysis stage...`);
+      const analysisResp = await withRetry(() => ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: [{ role: "user", parts: [{ text: analysisPrompt }] }],
+        config: { temperature: 0.3 },
+      }));
+      const analysis = (analysisResp.text || "").trim();
+      console.log(`[${requestId}] Analysis done (${analysis.length} chars).`);
 
-## Stap 1: Analyseer de transcriptie
-
-Stel het volgende vast (bewaar dit intern voor jezelf):
-- De 3–5 sterkste zoektermen
-- De rode draad en de meest indrukwekkende 'hook' of spoiler
-- Alle belangrijke feiten, namen en theorieën
-
-## Stap 2: Tekstgeneratie (YouTube & Spotify Strategie)
-
-Genereer de titels, beschrijvingen en shownotes op basis van de transcriptie. Omdat YouTube en Spotify fundamenteel anders werken, moet je twee aparte, uniek geoptimaliseerde versies maken. Baseer je strikt op deze regels:
-
-**Algemene Grammatica Regel (Zeer belangrijk)**:
-- Gebruik voor beide platformen normale Nederlandse hoofdletterregels. Gebruik GEEN 'Title Case' in de titels (dus niet elk woord met een hoofdletter). Alleen het eerste woord en eigennamen krijgen een hoofdletter.
-
-### Deel A: YouTube Optimalisatie (Focus: Click-Through Rate & Brand Safety)
-
-- **Titel**: Schrijf een spannende titel (curiosity gap). Maximaal 60-65 tekens. Gebruik NOOIT de serienaam of gastnaam. Gebruik brand-safe synoniemen in plaats van woorden die demonetization veroorzaken (bijv. 'fatale afloop' i.p.v. moord).
-- **Beschrijving (250 - 400 woorden)**:
-  - **Hook & Body**: Begin met een dwingende samenvatting (150 tekens) en duik daarna dieper in de feiten met relevante zoektermen. Vermeld de gast kort in de lopende tekst.
-  - **Tijdstempels (Cruciaal voor Chapters)**: Genereer minimaal 3 tijdstempels (minimaal 10 sec uit elkaar). Formatteer strikt als M:SS Beschrijving (GEEN opsommingstekens of haakjes). Start altijd exact op een nieuwe regel met 0:00 Introductie.
-  - **Hashtags**: Zet helemaal onderaan maximaal 3 tot 5 relevante hashtags (incl. #CrimeStation).
-
-### Deel B: Spotify Optimalisatie (Focus: Zoekbaarheid, Structuur & Audio)
-
-- **Titel**: Hanteer deze strikte, feitelijke structuur: [Naam van de Serie]: [Het concrete onderwerp/de zaak].
-- **Beschrijving / Shownotes (150 - 250 woorden)**:
-  - Begin met een feitelijke, inhoudelijke samenvatting (absoluut geen clickbait).
-  - Zet de naam en expertise van de gast (indien aanwezig) prominent in de tekst.
-  - **Tijdstempels**: Neem de strikt geformatteerde tijdstempels exact over van de YouTube-versie.
-  - **Geen Hashtags**: Gebruik geen hashtags in de Spotify tekst.
-
-### Deel C: Dynamische Call to Action (Kies op basis van de Serie & Inhoud)
-
-Je moet de juiste CTA kiezen afhankelijk van de serie en de inhoud. Kopieer en plak de exacte tekst.
-
-Scenario A: Zaak-gedreven (Crime Report, Cold Cases, Daily Wely, Schoffies)
-
-Voor YouTube:
-Heb jij een tip over een zaak?
-Meld het bij mick@crimestation.nl of anoniem via Meld Misdaad Anoniem: 0800-7000.
-
-• Abonneer je en klik op de bel voor nieuwe afleveringen.
-• Luister deze podcast op Spotify: [link naar aflevering]
-• Meer misdaadnieuws: www.crimestation.nl
-
-Voor Spotify:
-Heb jij een tip over een zaak?
-Meld het bij mick@crimestation.nl of anoniem via Meld Misdaad Anoniem: 0800-7000.
-
-Volg deze podcast om geen aflevering te missen.
-Meer misdaadnieuws: www.crimestation.nl
-
-Scenario B: Crime Insight (Q&A / Discussie)
-Voeg hierbij in de beschrijving áltijd "🎙️ Met Mick van Wely, Nancy Dekens & [Gastnaam]" toe.
-
-Voor YouTube:
-Heb je zelf een vraag voor Mick, Nancy of onze gasten? Mail naar mick@crimestation.nl.
-
-• Abonneer je voor wekelijkse reportages en rechtbankverslagen.
-• Luister deze podcast op Spotify: [link naar aflevering]
-• Meer misdaadnieuws: www.crimestation.nl
-
-Voor Spotify:
-Heb je zelf een vraag voor Mick, Nancy of onze gasten? Mail naar mick@crimestation.nl.
-
-Volg deze podcast op Spotify om geen aflevering te missen.
-Meer misdaadnieuws: www.crimestation.nl
-
-(Als de Crime Insight aflevering géén vragen beantwoordt, verander je de eerste zin van de CTA in beide kanalen naar: "Wat vind jij van deze discussie? Praat mee in de reacties of mail naar mick@crimestation.nl.")
-
-### Deel D: Verborgen YouTube Tags
-Genereer naast de beschrijving ook een aparte lijst met 10 zeer relevante steekwoorden voor het verborgen 'Tags'-veld in YouTube.
-CRUCIAAL: Scheid de woorden uitsluitend met een komma en gebruik NOOIT hashtags (#). (Bijvoorbeeld: hoornse taartzaak, gifmoord, nancy dekkers, mick van wely, strafrecht).
-
-### Deel E: Zichtbare YouTube Hashtags
-Hashtags in Beschrijving: Genereer aan het eind van de YouTube-beschrijving, dus ónder de volledige Call to Action uit Deel C, exact drie relevante hashtags.
-- Format: Gebruik hiervoor verplicht het # symbool (bijv. #CrimeStation #Zaaknaam #Misdaad).
-- Locatie: Deze hashtags moeten als platte tekst in de beschrijving blijven staan, zodat ze zichtbaar zijn voor de kijker.
-- Onderscheid: Verwar deze drie hashtags niet met de komma-gescheiden lijst voor de verborgen YouTube-tags uit Deel D; dit zijn twee aparte instructies.
-
-## Stap 3: Goedkeuring (Artifact Generatie)
-
-Belangrijke Systeeminformatie: De "Pauze" en de "Goedkeuring" worden veilig door de interface van de applicatie zelf afgehandeld! Het frontend systeem toont jouw output en wacht op expliciete goedkeuring om te publiceren.
-Om ervoor te zorgen dat de Publish API jouw gegenereerde data herkent: Je output MOET een valid JSON frame zijn. Vul de data exact in dit format in!
-
-**De output MAAK JE EXACT ALS DIT JSON FORMAT (Gebruik NOOIT markdown tabellen, geef puur het JSON object terug):**
-
-\`\`\`json
-{
-  "youtube": {
-    "titel": "...",
-    "beschrijving": "...",
-    "hashtags": ["#CrimeStation", "..."],
-    "tags": ["hoornse taartzaak", "gifmoord", "strafrecht"]
-  },
-  "spotify": {
-    "titel": "...",
-    "beschrijving": "..."
-  }
-}
-\`\`\`
-(De website teksten laat je voor nu weg)
-`;
-
-      const genResponse = await withRetry(() => ai.models.generateContent({
-        model: "gemini-2.5-flash-lite",
-        contents: [{ role: "user", parts: [{ text: promptText }] }],
-        config: {
-          temperature: 0.7,
-          tools: [{ googleSearch: {} }]
-        }
+      // Step 3c: Copy + chapter block-ids (pro)
+      const copyPrompt = buildCopyPrompt({
+        series, host1, host2, guest, episodeNumber, analysis, blocks,
+      });
+      console.log(`[${requestId}] Running copy stage...`);
+      const copyResp = await withRetry(() => ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: [{ role: "user", parts: [{ text: copyPrompt }] }],
+        config: { temperature: 0.7, responseMimeType: "application/json" },
       }));
 
-      let generatedContent = genResponse.text;
-      const jsonMatch = generatedContent.match(/\{[\s\S]*\}/);
-      let artifactContent = jsonMatch ? jsonMatch[0] : generatedContent;
+      const rawCopy = (copyResp.text || "").trim();
+      let parsedCopy: any;
+      try {
+        const m = rawCopy.match(/\{[\s\S]*\}/);
+        parsedCopy = JSON.parse(m ? m[0] : rawCopy);
+      } catch (e: any) {
+        throw new Error(`Kon copy-output niet parsen: ${e.message}`);
+      }
+
+      // Step 3d: Chapters valideren + timestamps server-side bouwen
+      const chapterList = buildChapterList(parsedCopy.chapters, blocks);
+      const chapterText = chapterList.map(c => `${formatTimestamp(c.start)} ${c.title}`).join("\n");
+
+      // Beschrijving samenstellen: intro + chapters + rest
+      const youtubeDescription = composeYoutubeDescription(parsedCopy.youtube, chapterText, guest);
+      const spotifyDescription = composeSpotifyDescription(parsedCopy.spotify, chapterText, guest);
+
+      const artifact = {
+        youtube: {
+          titel: parsedCopy.youtube?.titel || "",
+          beschrijving: youtubeDescription,
+          hashtags: parsedCopy.youtube?.hashtags || [],
+          tags: parsedCopy.youtube?.tags || [],
+        },
+        spotify: {
+          titel: parsedCopy.spotify?.titel || "",
+          beschrijving: spotifyDescription,
+        },
+        chapters: chapterList,
+      };
 
       console.log(`[${requestId}] Step 3: Text Generation completed.`);
 
       // Step 4: Creating Artifact
-      fs.writeFileSync(path.join(dataDir, "concept.json"), artifactContent || "");
+      const srtPath = path.join(dataDir, `srt_${requestId}.srt`);
+      fs.writeFileSync(srtPath, srtContent);
+      const artifactContent = JSON.stringify(artifact, null, 2);
+      fs.writeFileSync(path.join(dataDir, "concept.json"), artifactContent);
       fs.writeFileSync(path.join(dataDir, `meta_${requestId}.json`), JSON.stringify({ videoPath: sourceFile }));
 
-      res.json({ 
-        status: "waiting_approval", 
+      res.json({
+        status: "waiting_approval",
         data: {
           requestId: requestId,
           artifact: artifactContent,
-          transcription: transcription
+          transcription: transcription,
+          hasSrt: true
         }
       });
     } catch (error: any) {
-      console.error(`[${requestId}] Error:`, error);
-      res.status(500).json({ error: error.message || "Processing failed" });
+      console.error(`[${requestId}] Error at step ${currentStep}:`, error);
+      res.status(500).json({
+        error: error.message || "Processing failed",
+        step: currentStep,
+      });
     }
+  });
+
+  app.get("/api/download/srt/:requestId", (_req, res) => {
+    const srtPath = path.join(dataDir, `srt_${_req.params.requestId}.srt`);
+    if (!fs.existsSync(srtPath)) {
+      res.status(404).json({ error: "SRT bestand niet gevonden." });
+      return;
+    }
+    res.setHeader("Content-Disposition", `attachment; filename="transcriptie_${_req.params.requestId}.srt"`);
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.sendFile(srtPath);
   });
 
   app.post("/api/publish/youtube", async (req, res) => {

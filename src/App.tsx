@@ -60,6 +60,7 @@ export default function App() {
   const [editText, setEditText] = useState('');
   const [currentRequestId, setCurrentRequestId] = useState('');
   const [isYoutubeLinked, setIsYoutubeLinked] = useState(false);
+  const [hasSrt, setHasSrt] = useState(false);
 
   // Load state from localStorage on mount
   useEffect(() => {
@@ -192,6 +193,7 @@ export default function App() {
           2: data.data?.artifact
         });
         setCurrentRequestId(data.data?.requestId || '');
+        setHasSrt(!!data.data?.hasSrt);
         setSelectedStepIndex(2); // Laat de gegenereerde tekst standaard zien
         setSelectedPlatform('youtube');
         updateStepStatus(3, 'waiting');
@@ -278,15 +280,15 @@ export default function App() {
         jsonStr = jsonMatch[0];
       }
 
-      // Handle unescaped newlines in JSON values (common LLM error)
-      // This is a rough fix: replace raw newlines within string values with \n
-      const cleanedJson = jsonStr.replace(/: "(.*?)",/gs, (match, p1) => {
-        return `: "${p1.replace(/\n/g, '\\n')}",`;
-      }).replace(/: "(.*?)"\n?}/gs, (match, p1) => {
-        return `: "${p1.replace(/\n/g, '\\n')}"}`;
-      });
-
-      const data = JSON.parse(cleanedJson);
+      let data;
+      try {
+        // LLMs generally output valid JSON now, we attempt to parse it directly.
+        data = JSON.parse(jsonStr);
+      } catch (err) {
+        // Fallback for unescaped newlines if the strict parse fails
+        const cleanedJson = jsonStr.replace(/[\u0000-\u0019]+/g, ""); 
+        data = JSON.parse(cleanedJson);
+      }
       
       if (data.youtube || data.spotify || data.website) {
         const formatSections = (platformData: any) => {
@@ -483,64 +485,36 @@ export default function App() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 1</label>
-                    <button
-                      type="button"
-                      onClick={() => setHost1('Mick van Wely')}
-                      className="text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border border-white/10 text-white/40 hover:text-white transition-all"
-                    >
-                      ✓ Mick van Wely
-                    </button>
-                  </div>
-                  <input 
-                    type="text" 
-                    placeholder="bijv. Mick van Wely"
+                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 1</label>
+                  <select 
                     value={host1}
                     onChange={(e) => setHost1(e.target.value)}
-                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
-                  />
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
+                  >
+                    {['Mick van Wely', 'Nancy Dekens', 'Aziz Akhath', 'Wickey van der Meijden', 'Arthur Brand', 'Lena Olivier', 'Roy Regterschot'].map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
+                  </select>
                 </div>
                 <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 2</label>
-                    <button
-                      type="button"
-                      onClick={() => setHost2('Amber Bordewijk')}
-                      className="text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border border-white/10 text-white/40 hover:text-white transition-all"
-                    >
-                      ✓ Amber Bordewijk
-                    </button>
-                  </div>
-                  <input 
-                    type="text" 
-                    placeholder="bijv. Amber Bordewijk"
+                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 2</label>
+                  <select 
                     value={host2}
                     onChange={(e) => setHost2(e.target.value)}
-                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
-                  />
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
+                  >
+                    <option value="" className="bg-zinc-900">Geen / Leeg laten</option>
+                    {['Mick van Wely', 'Nancy Dekens', 'Aziz Akhath', 'Wickey van der Meijden', 'Arthur Brand', 'Lena Olivier', 'Roy Regterschot'].map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
+                  </select>
                 </div>
                 <div className="space-y-2 sm:col-span-2">
                   <div className="flex items-center justify-between gap-3">
                     <label className="text-xs font-mono uppercase tracking-widest opacity-50">Naam Gast</label>
-                    <div className="flex items-center gap-2">
-                      {lastGuest && lastGuest !== guest ? (
-                        <button
-                          type="button"
-                          onClick={() => setGuest(lastGuest)}
-                          className="text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border border-white/10 text-white/40 hover:text-white transition-all"
-                        >
-                          ✓ Laatste gast
-                        </button>
-                      ) : null}
-                      <button
-                        type="button"
-                        onClick={() => setGuest('')}
-                        className="text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border border-white/10 text-white/40 hover:text-white transition-all"
-                      >
-                        ✓ Geen gast
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setGuest(guest === 'Geen gast' ? '' : 'Geen gast')}
+                      className={`text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border transition-all ${guest === 'Geen gast' ? 'bg-orange-600 border-orange-600 text-white' : 'border-white/10 text-white/40 hover:text-white'}`}
+                    >
+                      ✓ Geen gast
+                    </button>
                   </div>
                   <input 
                     type="text" 
@@ -909,8 +883,21 @@ export default function App() {
                         </div>
                       </div>
                     ) : (
-                      <div className="prose prose-invert max-w-none prose-orange bg-black/30 rounded-xl p-6 border border-white/5">
-                        <ReactMarkdown>{stepData[selectedStepIndex]}</ReactMarkdown>
+                      <div>
+                        {selectedStepIndex === 1 && hasSrt && currentRequestId && (
+                          <div className="mb-4">
+                            <a
+                              href={`/api/download/srt/${currentRequestId}`}
+                              download
+                              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-orange-600/50 bg-orange-600/10 text-orange-500 hover:bg-orange-600/20 transition-all text-xs font-mono uppercase tracking-widest"
+                            >
+                              <ExternalLink className="w-3 h-3" /> Download SRT bestand
+                            </a>
+                          </div>
+                        )}
+                        <div className="prose prose-invert max-w-none prose-orange bg-black/30 rounded-xl p-6 border border-white/5">
+                          <ReactMarkdown>{stepData[selectedStepIndex]}</ReactMarkdown>
+                        </div>
                       </div>
                     )}
 
