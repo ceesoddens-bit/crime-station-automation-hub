@@ -25,7 +25,7 @@ if (fs.existsSync(localFfmpeg)) {
 }
 
 // Utility to retry promises with exponential backoff on transient errors
-async function withRetry<T>(fn: () => Promise<T>, retries = 3, delayMs = 2000): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, retries = 5, delayMs = 3000): Promise<T> {
   let attempt = 0;
   while (attempt < retries) {
     try {
@@ -34,11 +34,32 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 3, delayMs = 2000): 
       attempt++;
       console.warn(`[Retry] Attempt ${attempt} failed: ${error.message || error}`);
       if (attempt >= retries) throw error;
-      // Wait before retrying (exponential backoff)
-      await new Promise((res) => setTimeout(res, delayMs * Math.pow(2, attempt - 1)));
+      // Wait before retrying (exponential backoff, capped at 30s)
+      const wait = Math.min(delayMs * Math.pow(2, attempt - 1), 30000);
+      await new Promise((res) => setTimeout(res, wait));
     }
   }
   return fn(); // Fallback that should never be reached
+}
+
+// Try a Gemini call with the primary model; on persistent 503/UNAVAILABLE
+// fall back to an alternative model so the pipeline doesn't die when one
+// model is overloaded.
+async function generateWithFallback<T>(
+  call: (model: string) => Promise<T>,
+  primary: string,
+  fallback: string,
+): Promise<T> {
+  try {
+    return await withRetry(() => call(primary));
+  } catch (error: any) {
+    const status = error?.status ?? error?.response?.status;
+    const msg = String(error?.message || error);
+    const overloaded = status === 503 || /UNAVAILABLE|high demand|overloaded/i.test(msg);
+    if (!overloaded || primary === fallback) throw error;
+    console.warn(`[Fallback] ${primary} unavailable, retrying with ${fallback}`);
+    return await withRetry(() => call(fallback));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +239,11 @@ SCHRIJFSTIJL (zeer belangrijk)
 - Brand safety: vervang "moord" door "fataal geweldsdelict", "fataal incident", of "het verlies".
 - Titels zijn concreet en specifiek, niet abstract. Benoem waar het over gaat, niet hoe spannend het is.
 
-TITEL-VOORBEELDEN (juiste toon)
+TITEL-REGELS
+- YouTube-titel: NOOIT de serienaam ("${opts.series}") erin. Alleen het onderwerp van deze aflevering.
+- Spotify-titel: WEL de serienaam als prefix, formaat: "${opts.series}: [onderwerp]"
+
+TITEL-VOORBEELDEN (juiste toon voor YouTube)
 - "De onzichtbare strijd van nabestaanden"
 - "Wat er misging in het onderzoek naar de zaak-Hoorn"
 - "Waarom deze cold case na dertig jaar weer wordt heropend"
@@ -335,7 +360,7 @@ async function startServer() {
   app.get("/api/auth/youtube", (req, res) => {
     const url = oauth2Client.generateAuthUrl({
       access_type: "offline",
-      scope: ["https://www.googleapis.com/auth/youtube.upload"],
+      scope: ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.force-ssl"],
       prompt: 'consent'
     });
     res.redirect(url);
@@ -411,6 +436,8 @@ async function startServer() {
           host1: host1 || undefined,
           host2: host2 || undefined,
           guest: guest || undefined,
+          // Helpt Whisper om correcte interpunctie, hoofdletters en zinsgrenzen te gebruiken
+          initial_prompt: "Dit is een Nederlandse journalistieke podcast. Gebruik correcte interpunctie: hoofdletters aan het begin van zinnen, punten aan het einde, komma's bij opsommingen en bijzinnen. Schrijf getallen voluit waar passend. Gebruik geen afkortingen.",
         }),
         signal: AbortSignal.timeout(4 * 60 * 60 * 1000), // 4 uur voor lange afleveringen
       });
@@ -425,11 +452,13 @@ async function startServer() {
         throw new Error(`Whisper transcriptie mislukt: ${whisperData.detail || "onbekende fout"}`);
       }
 
-      const transcription = whisperData.transcription as string;
+      const rawTranscription = whisperData.transcription as string;
+      // Strip embedded timestamps like [00:00:08] or [01:23] that Whisper sometimes embeds in the text
+      const transcription = rawTranscription.replace(/\[\d{1,2}:\d{2}(:\d{2})?\]/g, '').replace(/\s{2,}/g, ' ').trim();
       const segments: any[] = whisperData.segments || [];
       if (!transcription || segments.length === 0) throw new Error("Transcriptie is leeg.");
 
-      // Generate SRT from segments
+      // Generate SRT from segments with Gemini punctuation + sentence-aligned timestamps
       const srtFmt = (s: number) => {
         const h = Math.floor(s / 3600).toString().padStart(2, "0");
         const m = Math.floor((s % 3600) / 60).toString().padStart(2, "0");
@@ -437,10 +466,126 @@ async function startServer() {
         const ms = Math.round((s % 1) * 1000).toString().padStart(3, "0");
         return `${h}:${m}:${sec},${ms}`;
       };
-      // SRT zonder sprekernamen — die horen niet in YouTube/Spotify ondertiteling.
-      // Sprekerlabels blijven wel in segments[] voor de DOCX-export.
-      const srtContent = segments.map((seg: any, i: number) => {
-        return `${i + 1}\n${srtFmt(seg.start)} --> ${srtFmt(seg.end)}\n${seg.text?.trim()}\n`;
+
+      const wrapSrtText = (text: string, maxChars = 42): string => {
+        const words = text.trim().split(/\s+/);
+        const lines: string[] = [];
+        let current = "";
+        for (const word of words) {
+          if ((current + (current ? " " : "") + word).length > maxChars && current) {
+            lines.push(current);
+            current = word;
+            if (lines.length === 2) { current = lines.pop() + " " + current; break; }
+          } else {
+            current = current ? `${current} ${word}` : word;
+          }
+        }
+        if (current) lines.push(current);
+        return lines.slice(0, 2).join("\n");
+      };
+
+      // Build word → timestamp index by distributing each segment's time range evenly across its words
+      interface WordTimestamp { word: string; start: number; end: number; }
+      const wordTimestamps: WordTimestamp[] = [];
+      for (const seg of segments) {
+        const segWords = (seg.text || "").trim().split(/\s+/).filter(Boolean);
+        if (segWords.length === 0) continue;
+        const dur = (seg.end - seg.start) / segWords.length;
+        segWords.forEach((w: string, wi: number) => {
+          wordTimestamps.push({ word: w, start: seg.start + wi * dur, end: seg.start + (wi + 1) * dur });
+        });
+      }
+
+      // Ask Gemini to add punctuation — one word per line to prevent deletions
+      let punctuatedText = transcription;
+      try {
+        const wordList = transcription.trim().split(/\s+/);
+        const numberedWords = wordList.map((w, i) => `${i + 1}. ${w}`).join('\n');
+        const punctPrompt = `Hieronder staat een Nederlandse gesproken transcriptie, één woord per regel met een regelnummer.
+
+Jouw taak: geef EXACT hetzelfde aantal regels terug, in EXACT dezelfde volgorde. Verander het woord op elke regel NIET. Voeg alleen interpunctie toe AAN HET EINDE van een woord als dat nodig is (punt, komma, vraagteken, uitroepteken). Zet het eerste woord van een nieuwe zin met een hoofdletter. Geef ALLEEN de genummerde lijst terug, niets anders.
+
+${numberedWords}`;
+        const punctResp = await generateWithFallback(
+          (model) => ai.models.generateContent({
+            model,
+            contents: [{ role: "user", parts: [{ text: punctPrompt }] }],
+            config: { temperature: 0.1 },
+          }),
+          "gemini-2.5-flash",
+          "gemini-2.5-pro",
+        );
+        const candidate = (punctResp.text || "").trim();
+        // Parse numbered lines back to words
+        const parsedWords = candidate.split('\n')
+          .map(line => line.replace(/^\d+\.\s*/, '').trim())
+          .filter(Boolean);
+        if (parsedWords.length >= wordList.length * 0.95 && parsedWords.length <= wordList.length * 1.05) {
+          punctuatedText = parsedWords.join(' ');
+          console.log(`[${requestId}] Gemini punctuation applied (${wordList.length}→${parsedWords.length} words).`);
+        } else {
+          console.warn(`[${requestId}] Gemini punctuation rejected (lines: ${wordList.length}→${parsedWords.length}), using original.`);
+        }
+      } catch (e: any) {
+        console.warn(`[${requestId}] Gemini punctuation failed, using original: ${e.message}`);
+      }
+
+      // Split punctuated text into sentences at sentence-ending punctuation
+      const sentenceRegex = /[^.!?]+[.!?]+/g;
+      const rawSentences: string[] = [];
+      let m: RegExpExecArray | null;
+      while ((m = sentenceRegex.exec(punctuatedText)) !== null) {
+        const s = m[0].trim();
+        if (s) rawSentences.push(s);
+      }
+      // Append any trailing text that has no sentence-ending punctuation
+      const lastMatch = punctuatedText.trimEnd().search(/[.!?][^.!?]*$/);
+      const trailingText = lastMatch >= 0 ? punctuatedText.slice(lastMatch + 1).trim() : punctuatedText.trim();
+      if (trailingText && rawSentences.length > 0) {
+        // Append to last sentence if it's short, otherwise add as new entry
+        if (trailingText.split(/\s+/).length < 5) {
+          rawSentences[rawSentences.length - 1] += " " + trailingText;
+        } else {
+          rawSentences.push(trailingText);
+        }
+      }
+      const sentences = rawSentences.length > 0 ? rawSentences : [punctuatedText];
+
+      // Match each sentence's first word back to wordTimestamps for start time
+      const normalizeWord = (w: string) => w.toLowerCase().replace(/[^a-z0-9]/g, "");
+      let wordIdx = 0;
+      interface SentenceEntry { text: string; start: number; end: number; }
+      const sentenceEntries: SentenceEntry[] = [];
+
+      for (let si = 0; si < sentences.length; si++) {
+        const sentWords = sentences[si].split(/\s+/).filter(Boolean);
+        const firstNorm = normalizeWord(sentWords[0] || "");
+        // Scan forward in wordTimestamps to find matching word
+        let foundIdx = -1;
+        for (let wi = wordIdx; wi < Math.min(wordIdx + 30, wordTimestamps.length); wi++) {
+          if (normalizeWord(wordTimestamps[wi].word) === firstNorm) { foundIdx = wi; break; }
+        }
+        if (foundIdx === -1) {
+          // Fallback: use current wordIdx position
+          foundIdx = Math.min(wordIdx, wordTimestamps.length - 1);
+        }
+        const startTime = wordTimestamps[foundIdx]?.start ?? (sentenceEntries[si - 1]?.end ?? 0);
+
+        // Find end time: advance wordIdx by sentence word count
+        wordIdx = foundIdx + sentWords.length;
+        const endTime = wordTimestamps[Math.min(wordIdx - 1, wordTimestamps.length - 1)]?.end ?? startTime + 3;
+
+        sentenceEntries.push({ text: sentences[si], start: startTime, end: endTime });
+      }
+
+      // Ensure end of last entry covers the actual audio end
+      if (sentenceEntries.length > 0 && wordTimestamps.length > 0) {
+        sentenceEntries[sentenceEntries.length - 1].end = wordTimestamps[wordTimestamps.length - 1].end;
+      }
+
+      const srtContent = sentenceEntries.map((entry, i) => {
+        const text = wrapSrtText(entry.text);
+        return `${i + 1}\n${srtFmt(entry.start)} --> ${srtFmt(entry.end)}\n${text}\n`;
       }).join("\n");
 
       console.log(`[${requestId}] Transcription completed (${segments.length} segmenten).`);
@@ -455,11 +600,15 @@ async function startServer() {
       // Step 3b: Analyse-stap (flash) — begrijp de aflevering eerst
       const analysisPrompt = buildAnalysisPrompt({ series, host1, host2, guest, transcription });
       console.log(`[${requestId}] Running analysis stage...`);
-      const analysisResp = await withRetry(() => ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [{ role: "user", parts: [{ text: analysisPrompt }] }],
-        config: { temperature: 0.3 },
-      }));
+      const analysisResp = await generateWithFallback(
+        (model) => ai.models.generateContent({
+          model,
+          contents: [{ role: "user", parts: [{ text: analysisPrompt }] }],
+          config: { temperature: 0.3 },
+        }),
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+      );
       const analysis = (analysisResp.text || "").trim();
       console.log(`[${requestId}] Analysis done (${analysis.length} chars).`);
 
@@ -468,11 +617,15 @@ async function startServer() {
         series, host1, host2, guest, episodeNumber, analysis, blocks,
       });
       console.log(`[${requestId}] Running copy stage...`);
-      const copyResp = await withRetry(() => ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [{ role: "user", parts: [{ text: copyPrompt }] }],
-        config: { temperature: 0.7, responseMimeType: "application/json" },
-      }));
+      const copyResp = await generateWithFallback(
+        (model) => ai.models.generateContent({
+          model,
+          contents: [{ role: "user", parts: [{ text: copyPrompt }] }],
+          config: { temperature: 0.7, responseMimeType: "application/json" },
+        }),
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+      );
 
       const rawCopy = (copyResp.text || "").trim();
       let parsedCopy: any;
@@ -512,14 +665,20 @@ async function startServer() {
       fs.writeFileSync(srtPath, srtContent);
       const artifactContent = JSON.stringify(artifact, null, 2);
       fs.writeFileSync(path.join(dataDir, "concept.json"), artifactContent);
-      fs.writeFileSync(path.join(dataDir, `meta_${requestId}.json`), JSON.stringify({ videoPath: sourceFile }));
+      fs.writeFileSync(path.join(dataDir, `meta_${requestId}.json`), JSON.stringify({ videoPath: sourceFile, artifact }));
+
+      // Bouw leesbare transcriptie op basis van zinsgrenzen met Gemini-interpunctie
+      const readableTranscription = sentenceEntries.map((entry) => {
+        const ts = `[${srtFmt(entry.start).replace(',', '.').slice(0, 8)}]`;
+        return `${ts} ${entry.text}`;
+      }).join('\n');
 
       res.json({
         status: "waiting_approval",
         data: {
           requestId: requestId,
           artifact: artifactContent,
-          transcription: transcription,
+          transcription: readableTranscription,
           hasSrt: true
         }
       });
@@ -545,42 +704,118 @@ async function startServer() {
 
   app.post("/api/publish/youtube", async (req, res) => {
     try {
-      const { requestId, youtube } = req.body;
+      const { requestId, youtubeOverride } = req.body;
       if (!requestId) throw new Error("Geen requestId meegegeven.");
-      
+
       const metaFile = path.join(dataDir, `meta_${requestId}.json`);
       if (!fs.existsSync(metaFile)) throw new Error("Video metadata niet gevonden. (Start het proces opnieuw)");
-      
-      const { videoPath } = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+
+      const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+      const { videoPath, artifact } = meta;
       if (!fs.existsSync(videoPath)) throw new Error("Originele videobestand is niet meer beschikbaar.");
-      
+
+      // Gebruik bewerkte versie van de frontend als die beschikbaar is, anders de opgeslagen versie
+      const youtube = youtubeOverride ?? artifact?.youtube ?? {};
+      const tags = Array.isArray(youtube.tags) ? youtube.tags : (typeof youtube.tags === 'string' ? youtube.tags.split(',').map((t: string) => t.trim()) : []);
+
       const youtubeApi = google.youtube('v3');
-      const tags = typeof youtube?.tags === 'string' ? youtube.tags.split(',').map((t: string) => t.trim()) : (Array.isArray(youtube?.tags) ? youtube.tags : []);
-      
+
       const response = await youtubeApi.videos.insert({
         auth: oauth2Client,
         part: ['snippet', 'status'],
         requestBody: {
           snippet: {
-            title: youtube?.titel ? youtube.titel.slice(0, 100) : "Crime Station Aflevering",
-            description: youtube?.beschrijving || "",
-            tags: tags,
-            categoryId: "25", // 25 = News & Politics
+            title: youtube.titel ? String(youtube.titel).slice(0, 100) : "Crime Station Aflevering",
+            description: youtube.beschrijving || "",
+            tags,
+            categoryId: "25",
             defaultLanguage: 'nl',
             defaultAudioLanguage: 'nl'
           },
-          status: { 
+          status: {
             privacyStatus: 'private',
             selfDeclaredMadeForKids: false
           }
         },
         media: { body: fs.createReadStream(videoPath) }
       });
-      
-      res.json({ status: "completed", links: { youtube: `https://youtube.com/watch?v=${response.data.id}` } });
+
+      const videoId = response.data.id!;
+
+      // Upload SRT als ondertiteling
+      const srtPath = path.join(dataDir, `srt_${requestId}.srt`);
+      if (fs.existsSync(srtPath)) {
+        try {
+          await youtubeApi.captions.insert({
+            auth: oauth2Client,
+            part: ['snippet'],
+            requestBody: {
+              snippet: {
+                videoId,
+                language: 'nl',
+                name: 'Nederlands',
+                isDraft: false,
+              }
+            },
+            media: { body: fs.createReadStream(srtPath) }
+          });
+        } catch (captionErr: any) {
+          console.warn("SRT upload mislukt (video wel geüpload):", captionErr.message);
+        }
+      }
+
+      // Sla videoId op zodat we later de beschrijving kunnen updaten (bijv. Spotify link)
+      fs.writeFileSync(metaFile, JSON.stringify({ ...meta, youtubeVideoId: videoId }));
+
+      res.json({ status: "completed", links: { youtube: `https://youtube.com/watch?v=${videoId}` } });
     } catch (error: any) {
       console.error("Publish error:", error);
       res.status(500).json({ error: error.message || "Failed to publish" });
+    }
+  });
+
+  // Update YouTube beschrijving met Spotify link zodra die beschikbaar is
+  app.post("/api/publish/update-spotify-link", async (req, res) => {
+    try {
+      const { requestId, spotifyUrl } = req.body;
+      if (!requestId || !spotifyUrl) throw new Error("requestId en spotifyUrl zijn verplicht.");
+
+      const metaFile = path.join(dataDir, `meta_${requestId}.json`);
+      if (!fs.existsSync(metaFile)) throw new Error("Metadata niet gevonden.");
+
+      const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+      if (!meta.youtubeVideoId) throw new Error("Geen YouTube video ID gevonden — eerst publiceren naar YouTube.");
+
+      const youtubeApi = google.youtube('v3');
+
+      // Huidige video ophalen
+      const current = await youtubeApi.videos.list({
+        auth: oauth2Client,
+        part: ['snippet'],
+        id: [meta.youtubeVideoId],
+      });
+
+      const snippet = current.data.items?.[0]?.snippet;
+      if (!snippet) throw new Error("YouTube video niet gevonden.");
+
+      const updatedDescription = (snippet.description || "").replace("[link]", spotifyUrl);
+
+      await youtubeApi.videos.update({
+        auth: oauth2Client,
+        part: ['snippet'],
+        requestBody: {
+          id: meta.youtubeVideoId,
+          snippet: { ...snippet, description: updatedDescription },
+        },
+      });
+
+      // Sla Spotify URL op in meta
+      fs.writeFileSync(metaFile, JSON.stringify({ ...meta, spotifyUrl }));
+
+      res.json({ status: "completed" });
+    } catch (error: any) {
+      console.error("Update Spotify link error:", error);
+      res.status(500).json({ error: error.message || "Failed to update description" });
     }
   });
 

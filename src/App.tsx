@@ -31,6 +31,7 @@ interface Step {
   description: string;
   status: StepStatus;
   icon: React.ReactNode;
+  errorMessage?: string;
 }
 
 type PublishLinks = {
@@ -58,9 +59,13 @@ export default function App() {
   const [copiedPlatform, setCopiedPlatform] = useState<null | string>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState('');
+  const [showPublishConfirm, setShowPublishConfirm] = useState(false);
   const [currentRequestId, setCurrentRequestId] = useState('');
   const [isYoutubeLinked, setIsYoutubeLinked] = useState(false);
   const [hasSrt, setHasSrt] = useState(false);
+  const [spotifyShowUrl, setSpotifyShowUrl] = useState('');
+  const [showSpotifyModal, setShowSpotifyModal] = useState(false);
+  const [spotifyInput, setSpotifyInput] = useState('');
 
   // Load state from localStorage on mount
   useEffect(() => {
@@ -92,6 +97,11 @@ export default function App() {
   useEffect(() => {
     const savedLastGuest = localStorage.getItem('crime-station-last-guest');
     if (savedLastGuest) setLastGuest(savedLastGuest);
+  }, []);
+
+  useEffect(() => {
+    const saved = localStorage.getItem('crime-station-spotify-url');
+    if (saved) setSpotifyShowUrl(saved);
   }, []);
 
   useEffect(() => {
@@ -155,7 +165,7 @@ export default function App() {
 
   const [steps, setSteps] = useState<Step[]>([
     { id: 1, title: 'Video Compressie', description: 'Downloaden en comprimeren naar proxy (10MB).', status: 'idle', icon: <Video className="w-5 h-5" /> },
-    { id: 2, title: 'Transcriptie', description: 'Audio extraheren en transcriberen via Gemini.', status: 'idle', icon: <FileText className="w-5 h-5" /> },
+    { id: 2, title: 'Transcriptie', description: 'Audio extraheren en transcriberen via Whisper.', status: 'idle', icon: <FileText className="w-5 h-5" /> },
     { id: 3, title: 'Tekstgeneratie', description: 'SEO titels en beschrijvingen genereren.', status: 'idle', icon: <Play className="w-5 h-5" /> },
     { id: 4, title: 'Goedkeuring', description: 'Review de gegenereerde content.', status: 'idle', icon: <CheckCircle2 className="w-5 h-5" /> },
     { id: 5, title: 'Publiceren', description: 'Uploaden naar YouTube en Spotify.', status: 'idle', icon: <Youtube className="w-5 h-5" /> },
@@ -212,12 +222,12 @@ export default function App() {
         errorStep = 2;
       }
       
-      updateStepStatus(errorStep, 'error');
+      updateStepStatus(errorStep, 'error', errorMessage || error.message || 'Onbekende fout');
     }
   };
 
-  const updateStepStatus = (index: number, status: StepStatus) => {
-    setSteps(prev => prev.map((s, i) => i === index ? { ...s, status } : s));
+  const updateStepStatus = (index: number, status: StepStatus, errorMessage?: string) => {
+    setSteps(prev => prev.map((s, i) => i === index ? { ...s, status, errorMessage } : s));
     setCurrentStep(index);
   };
 
@@ -228,23 +238,16 @@ export default function App() {
     updateStepStatus(4, 'processing');
     
     try {
-      let payload: any = { approved: true, requestId: currentRequestId };
+      let payload: any = { requestId: currentRequestId };
       try {
-        const content = stepData[2] || (isEditing ? editText : '');
-        let jsonStr = content;
+        const content = stepData[2] || '';
         const jsonMatch = content.match(/\{[\s\S]*\}/);
-        if (jsonMatch) jsonStr = jsonMatch[0];
-        
-        const cleanedJson = jsonStr.replace(/: "(.*?)",/gs, (match, p1) => {
-          return `: "${p1.replace(/\n/g, '\\n')}",`;
-        }).replace(/: "(.*?)"\n?}/gs, (match, p1) => {
-          return `: "${p1.replace(/\n/g, '\\n')}"}`;
-        });
-        
-        const parsed = JSON.parse(cleanedJson);
-        if (parsed.youtube) payload.youtube = parsed.youtube;
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          if (parsed.youtube) payload.youtubeOverride = parsed.youtube;
+        }
       } catch (e) {
-        console.error("Could not parse json content for approval, sending defaults");
+        console.warn("Kon bewerkte tekst niet parsen, server gebruikt opgeslagen versie");
       }
 
       const response = await axios.post('/api/publish/youtube', payload);
@@ -253,10 +256,16 @@ export default function App() {
       if (data.status === 'completed') {
         updateStepStatus(4, 'completed');
         const links = (data?.links ?? {}) as PublishLinks;
-        setPublishLinks({
-          youtube: typeof links.youtube === 'string' ? links.youtube : undefined,
-          spotify: typeof links.spotify === 'string' ? links.spotify : undefined,
-        });
+        const youtubeUrl = typeof links.youtube === 'string' ? links.youtube : undefined;
+        const spotifyUrl = typeof links.spotify === 'string' ? links.spotify : undefined;
+        setPublishLinks({ youtube: youtubeUrl, spotify: spotifyUrl });
+
+        // Vul [link] in de YouTube beschrijving met de Spotify URL (per-aflevering of show-URL als fallback)
+        const resolvedSpotifyUrl = spotifyUrl || spotifyShowUrl || null;
+        if (youtubeUrl && resolvedSpotifyUrl) {
+          axios.post('/api/publish/update-spotify-link', { requestId: currentRequestId, spotifyUrl: resolvedSpotifyUrl })
+            .catch(e => console.warn("Spotify link update mislukt:", e));
+        }
         setStepData(prev => ({
           ...prev,
           4: 'Publicatie afgerond.'
@@ -395,7 +404,8 @@ export default function App() {
           <p className="text-gray-400 max-w-xl text-lg">
             Autonome verwerking van video naar podcast en SEO-geoptimaliseerde content.
           </p>
-          <div className="mt-4 flex">
+          <div className="mt-4 flex flex-wrap gap-3">
+            {/* YouTube */}
             {isYoutubeLinked ? (
               <div className="text-xs font-mono uppercase bg-green-600/20 text-green-500 border border-green-500/30 px-3 py-1.5 rounded flex items-center gap-2">
                 <Check className="w-3 h-3" /> YouTube Gekoppeld
@@ -405,8 +415,88 @@ export default function App() {
                 <Youtube className="w-3 h-3" /> Koppel YouTube Account (Eenmalig)
               </a>
             )}
+
+            {/* Spotify */}
+            {spotifyShowUrl ? (
+              <button
+                onClick={() => { setSpotifyInput(spotifyShowUrl); setShowSpotifyModal(true); }}
+                className="text-xs font-mono uppercase bg-green-600/20 text-green-500 border border-green-500/30 px-3 py-1.5 rounded flex items-center gap-2 hover:bg-green-600/30 transition-colors"
+              >
+                <Check className="w-3 h-3" /> Spotify Gekoppeld
+              </button>
+            ) : (
+              <button
+                onClick={() => { setSpotifyInput(''); setShowSpotifyModal(true); }}
+                className="text-xs font-mono uppercase bg-red-600/20 text-red-500 border border-red-500/30 px-3 py-1.5 rounded flex items-center gap-2 hover:bg-red-600/40 transition-colors"
+              >
+                <Music className="w-3 h-3" /> Koppel Spotify Podcast (Eenmalig)
+              </button>
+            )}
           </div>
         </header>
+
+        {/* Spotify modal */}
+        <AnimatePresence>
+          {showSpotifyModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+              onClick={() => setShowSpotifyModal(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-full max-w-md"
+                onClick={e => e.stopPropagation()}
+              >
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-8 h-8 bg-green-600 rounded flex items-center justify-center">
+                    <Music className="w-4 h-4 text-white" />
+                  </div>
+                  <h3 className="text-lg font-bold">Spotify Podcast Koppelen</h3>
+                </div>
+                <p className="text-sm text-gray-400 mb-4">
+                  Voer de URL in van je Spotify podcast show. Deze wordt automatisch gebruikt in beschrijvingen en links.
+                </p>
+                <input
+                  type="url"
+                  value={spotifyInput}
+                  onChange={e => setSpotifyInput(e.target.value)}
+                  placeholder="https://open.spotify.com/show/..."
+                  className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-green-500 mb-4"
+                  autoFocus
+                />
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setShowSpotifyModal(false)}
+                    className="flex-1 px-4 py-2.5 text-sm text-gray-400 border border-zinc-700 rounded-lg hover:bg-zinc-800 transition-colors"
+                  >
+                    Annuleren
+                  </button>
+                  <button
+                    onClick={() => {
+                      const url = spotifyInput.trim();
+                      if (url) {
+                        setSpotifyShowUrl(url);
+                        localStorage.setItem('crime-station-spotify-url', url);
+                      } else {
+                        setSpotifyShowUrl('');
+                        localStorage.removeItem('crime-station-spotify-url');
+                      }
+                      setShowSpotifyModal(false);
+                    }}
+                    className="flex-1 px-4 py-2.5 text-sm font-semibold bg-green-600 hover:bg-green-500 text-white rounded-lg transition-colors"
+                  >
+                    {spotifyInput.trim() ? 'Opslaan' : 'Ontkoppelen'}
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {!isStarted ? (
           <motion.section 
@@ -476,21 +566,23 @@ export default function App() {
                 </div>
                 <div className="space-y-2">
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Aflevering #</label>
-                  <input 
-                    type="text" 
+                  <input
+                    type="number"
+                    min="1"
                     placeholder="bijv. 6"
                     value={episodeNumber}
-                    onChange={(e) => setEpisodeNumber(e.target.value)}
+                    onChange={(e) => setEpisodeNumber(e.target.value.replace(/\D/g, ''))}
                     className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
                   />
                 </div>
                 <div className="space-y-2">
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 1</label>
-                  <select 
+                  <select
                     value={host1}
                     onChange={(e) => setHost1(e.target.value)}
                     className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
                   >
+                    <option value="" className="bg-zinc-900">— Solo / geen presentator —</option>
                     {['Mick van Wely', 'Nancy Dekens', 'Aziz Akhath', 'Wickey van der Meijden', 'Arthur Brand', 'Lena Olivier', 'Roy Regterschot'].map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
                   </select>
                 </div>
@@ -516,23 +608,39 @@ export default function App() {
                       ✓ Geen gast
                     </button>
                   </div>
-                  <input 
-                    type="text" 
+                  <input
+                    type="text"
                     placeholder="Naam van de gast"
                     value={guest}
                     onChange={(e) => setGuest(e.target.value)}
                     className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
                   />
+                  {lastGuest && guest !== lastGuest && guest !== 'Geen gast' && (
+                    <button
+                      type="button"
+                      onClick={() => setGuest(lastGuest)}
+                      className="text-xs text-orange-400 hover:text-orange-300 transition-colors"
+                    >
+                      ↩ Vorige gast: {lastGuest}
+                    </button>
+                  )}
                 </div>
               </div>
 
-              <button 
-                onClick={handleStart}
-                disabled={(videoSource === 'drive' && !driveUrl) || (videoSource === 'local' && !localFile)}
-                className="w-full bg-orange-600 hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-5 rounded-lg transition-all flex items-center justify-center gap-3 text-xl uppercase tracking-tighter"
-              >
-                Start Verwerking <Play className="w-6 h-6 fill-current" />
-              </button>
+              <div className="space-y-2">
+                <button
+                  onClick={handleStart}
+                  disabled={(videoSource === 'drive' && !driveUrl) || (videoSource === 'local' && !localFile) || !isYoutubeLinked}
+                  className="w-full bg-orange-600 hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-5 rounded-lg transition-all flex items-center justify-center gap-3 text-xl uppercase tracking-tighter"
+                >
+                  Start Verwerking <Play className="w-6 h-6 fill-current" />
+                </button>
+                {!isYoutubeLinked && (
+                  <p className="text-xs text-red-400 text-center flex items-center justify-center gap-1">
+                    <AlertCircle className="w-3 h-3" /> Koppel eerst je YouTube account via de knop bovenaan
+                  </p>
+                )}
+              </div>
             </div>
 
             <div className="bg-white/5 border border-white/10 rounded-2xl p-8 flex flex-col justify-between">
@@ -545,7 +653,7 @@ export default function App() {
                   </li>
                   <li className="flex gap-3">
                     <CheckCircle2 className="w-5 h-5 text-orange-600 shrink-0" />
-                    <span>Transcriptie via Gemini API</span>
+                    <span>Transcriptie via Whisper</span>
                   </li>
                   <li className="flex gap-3">
                     <CheckCircle2 className="w-5 h-5 text-orange-600 shrink-0" />
@@ -565,13 +673,15 @@ export default function App() {
             </div>
           </motion.section>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-12">
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
             {/* Progress Sidebar */}
             <div className="lg:col-span-1 space-y-4">
               <h3 className="text-xs font-mono uppercase tracking-widest opacity-50 mb-6">Voortgang</h3>
-              {steps.map((step, idx) => (
-                <button 
-                  key={step.id} 
+              {steps.filter(step => step.title !== 'Goedkeuring').map((step) => {
+                const idx = steps.indexOf(step);
+                return (
+                <button
+                  key={step.id}
                   onClick={() => {
                     if (step.status === 'completed' || step.status === 'waiting' || step.status === 'processing') {
                       setSelectedStepIndex(idx);
@@ -604,15 +714,15 @@ export default function App() {
                     </div>
                     <div>
                       <h4 className="font-bold text-sm">{step.title}</h4>
-                      <p className="text-xs opacity-60">{step.description}</p>
                     </div>
                   </div>
                 </button>
-              ))}
+                );
+              })}
             </div>
 
             {/* Main Content Area */}
-            <div className="lg:col-span-2">
+            <div className="lg:col-span-3">
               <AnimatePresence mode="wait">
                 {steps[currentStep].status === 'error' ? (
                   <motion.div 
@@ -622,13 +732,26 @@ export default function App() {
                   >
                     <AlertCircle className="w-12 h-12 text-red-500 mb-6" />
                     <h3 className="text-2xl font-bold mb-2">Er is iets misgegaan!</h3>
-                    <p className="text-gray-500 mb-8 max-w-md">De verwerking van de video is mislukt door een onbekende fout of ongeldige invoer.</p>
-                    <button 
-                      onClick={() => { localStorage.removeItem('crime-station-state'); setIsStarted(false); setSteps(prev => prev.map(s => ({ ...s, status: 'idle' }))); setStepData({}); setSelectedStepIndex(null); }}
-                      className="bg-zinc-800 hover:bg-zinc-700 text-white px-8 py-3 rounded-lg font-bold transition-all"
-                    >
-                      Terug naar Instellingen
-                    </button>
+                    <p className="text-gray-500 mb-4 max-w-md">Stap: <strong>{steps[currentStep]?.title}</strong></p>
+                    {steps[currentStep]?.errorMessage && (
+                      <pre className="text-left text-xs text-red-300 bg-red-950/50 border border-red-500/20 rounded-lg p-4 mb-4 max-w-lg w-full overflow-auto max-h-48 whitespace-pre-wrap break-words">
+                        {steps[currentStep].errorMessage}
+                      </pre>
+                    )}
+                    <div className="flex gap-3">
+                      <button
+                        onClick={() => { updateStepStatus(currentStep, 'processing'); handleStart(); }}
+                        className="bg-orange-600 hover:bg-orange-500 text-white px-6 py-3 rounded-lg font-bold transition-all flex items-center gap-2"
+                      >
+                        <RotateCcw className="w-4 h-4" /> Opnieuw proberen
+                      </button>
+                      <button
+                        onClick={() => { localStorage.removeItem('crime-station-state'); setIsStarted(false); setSteps(prev => prev.map(s => ({ ...s, status: 'idle' }))); setStepData({}); setSelectedStepIndex(null); }}
+                        className="bg-zinc-800 hover:bg-zinc-700 text-white px-6 py-3 rounded-lg font-bold transition-all"
+                      >
+                        Terug naar Instellingen
+                      </button>
+                    </div>
                   </motion.div>
                 ) : selectedStepIndex !== null && stepData[selectedStepIndex] ? (
                   <motion.div 
@@ -647,36 +770,57 @@ export default function App() {
                         </div>
                       </div>
                       <div className="flex items-center gap-3">
-                        {selectedStepIndex !== null && (
-                          <button 
+                        {selectedStepIndex === 2 && !isApproved && (
+                          isEditing ? (
+                            <button
+                              onClick={() => {
+                                setStepData(prev => ({ ...prev, [selectedStepIndex]: editText }));
+                                setIsEditing(false);
+                              }}
+                              className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg font-bold transition-all flex items-center gap-2"
+                            >
+                              <Check className="w-4 h-4" /> Opslaan
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => {
+                                  setEditText(stepData[selectedStepIndex] || '');
+                                  setIsEditing(true);
+                                }}
+                                className="border border-white/20 bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-lg font-bold transition-all flex items-center gap-2 whitespace-nowrap"
+                              >
+                                <Pencil className="w-4 h-4" /> Tekst bewerken
+                              </button>
+                              <button
+                                onClick={() => setShowPublishConfirm(true)}
+                                className="bg-orange-600 hover:bg-orange-500 text-white px-5 py-2 rounded-lg font-bold transition-all flex items-center gap-2"
+                              >
+                                <Youtube className="w-4 h-4" /> Publiceren <ChevronRight className="w-4 h-4" />
+                              </button>
+                            </>
+                          )
+                        )}
+                        {selectedStepIndex !== null && selectedStepIndex !== 2 && (
+                          <button
                             onClick={() => {
                               if (isEditing) {
-                                // Save changes
                                 setStepData(prev => ({ ...prev, [selectedStepIndex]: editText }));
                                 setIsEditing(false);
                               } else {
-                                // Start editing
                                 setEditText(stepData[selectedStepIndex] || '');
                                 setIsEditing(true);
                               }
                             }}
                             className={cn(
                               "p-2 rounded-lg transition-all flex items-center gap-2 font-bold",
-                              isEditing 
-                                ? "bg-green-600 text-white hover:bg-green-500" 
+                              isEditing
+                                ? "bg-green-600 text-white hover:bg-green-500"
                                 : "bg-white/5 text-gray-400 hover:text-white hover:bg-white/10"
                             )}
                             title={isEditing ? "Opslaan" : "Bewerken"}
                           >
                             {isEditing ? <><Check className="w-4 h-4" /> Opslaan</> : <Pencil className="w-4 h-4" />}
-                          </button>
-                        )}
-                        {selectedStepIndex === 2 && !isApproved && !isEditing && (
-                          <button 
-                            onClick={handleApprove}
-                            className="bg-green-600 hover:bg-green-500 text-white px-6 py-2 rounded-lg font-bold transition-all flex items-center gap-2"
-                          >
-                            Goedgekeurd <Check className="w-4 h-4" />
                           </button>
                         )}
                       </div>
@@ -776,10 +920,21 @@ export default function App() {
                                   });
                                 }
 
-                                return sections.map((section, idx) => (
+                                return sections.map((section, idx) => {
+                                  const isTitel = section.title.includes('Titel') || section.title.includes('titel');
+                                  const charCount = section.content.length;
+                                  const isOverLimit = selectedPlatform === 'youtube' && isTitel && charCount > 100;
+                                  return (
                                   <div key={idx} className="bg-white/5 border border-white/10 rounded-xl p-4 relative group">
                                     <div className="flex items-center justify-between mb-4 pb-4 border-b border-white/5">
-                                      <h4 className="font-bold text-lg text-orange-500">{section.title}</h4>
+                                      <div className="flex items-center gap-2">
+                                        <h4 className="font-bold text-lg text-orange-500">{section.title}</h4>
+                                        {selectedPlatform === 'youtube' && isTitel && (
+                                          <span className={cn("text-xs font-mono px-2 py-0.5 rounded", isOverLimit ? "bg-red-500/20 text-red-400" : "bg-white/10 text-white/40")}>
+                                            {charCount}/100
+                                          </span>
+                                        )}
+                                      </div>
                                       <button
                                         type="button"
                                         onClick={() => handleCopy(`${selectedPlatform}-${idx}`, section.content)}
@@ -789,98 +944,108 @@ export default function App() {
                                         {copiedPlatform === `${selectedPlatform}-${idx}` ? "Gekopieerd" : "Kopieer"}
                                       </button>
                                     </div>
-                                    <div className="prose prose-invert max-w-none prose-orange prose-sm whitespace-pre-wrap">
+                                    <div className="prose prose-invert max-w-none prose-orange prose-sm whitespace-pre-wrap [&_p]:my-1 [&_p]:leading-relaxed">
                                       <ReactMarkdown>{section.content}</ReactMarkdown>
                                     </div>
                                   </div>
-                                ));
-                              })()}
+                                  );
+                                })}
+                              )()}
                             </div>
                           </div>
                         );
                       })()
                     ) : selectedStepIndex === 4 ? (
                       <div className="bg-black/30 rounded-xl border border-white/5 overflow-hidden">
-                        <div className="flex items-center justify-between gap-4 p-4 border-b border-white/5">
-                          <div className="flex items-center gap-2">
-                            <div className="px-3 py-2 rounded-lg border border-white/10 bg-white/5 text-white/70 text-xs font-mono uppercase tracking-widest flex items-center gap-2">
-                              <Share2 className="w-4 h-4" /> Links
-                            </div>
-                          </div>
-                          {publishLinks?.youtube || publishLinks?.spotify ? (
-                            <button
-                              type="button"
-                              onClick={() => handleCopy('publish-all', [publishLinks?.youtube, publishLinks?.spotify].filter(Boolean).join('\n'))}
-                              className="px-3 py-2 rounded-lg border border-white/10 bg-white/5 text-white/70 hover:text-white transition-all flex items-center gap-2 text-xs font-mono uppercase tracking-widest"
-                            >
-                              <Copy className="w-4 h-4" />
-                              {copiedPlatform === 'publish-all' ? 'Gekopieerd' : 'Kopieer Alles'}
-                            </button>
-                          ) : null}
-                        </div>
                         <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
-                          <div className="bg-white/5 border border-white/10 rounded-xl p-4">
-                            <div className="flex items-center justify-between mb-4 pb-4 border-b border-white/5">
-                              <h4 className="font-bold text-lg text-orange-500 flex items-center gap-2"><Youtube className="w-4 h-4" /> YouTube</h4>
-                              {publishLinks?.youtube ? (
-                                <div className="flex items-center gap-2">
-                                  <a
-                                    href={publishLinks.youtube}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/70 hover:text-white transition-all flex items-center gap-2 text-xs font-mono uppercase tracking-widest"
-                                  >
-                                    <ExternalLink className="w-3 h-3" /> Open
-                                  </a>
+                          {/* YouTube */}
+                          <div className="bg-white/5 border border-white/10 rounded-xl p-4 flex flex-col gap-3">
+                            <h4 className="font-bold text-lg text-orange-500 flex items-center gap-2">
+                              <Youtube className="w-4 h-4" /> YouTube
+                            </h4>
+                            {publishLinks?.youtube ? (
+                              <>
+                                <div className="flex items-center gap-2 bg-black/20 rounded-lg px-3 py-2">
+                                  <span className="text-sm text-gray-300 break-all font-mono flex-1">{publishLinks.youtube}</span>
                                   <button
                                     type="button"
                                     onClick={() => handleCopy('publish-youtube', publishLinks.youtube ?? '')}
-                                    className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/70 hover:text-white transition-all flex items-center gap-2 text-xs font-mono uppercase tracking-widest"
+                                    className="shrink-0 text-white/40 hover:text-white transition-colors"
+                                    title="Kopieer link"
                                   >
-                                    <Copy className="w-3 h-3" />
-                                    {copiedPlatform === 'publish-youtube' ? 'Gekopieerd' : 'Kopieer'}
+                                    {copiedPlatform === 'publish-youtube' ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
                                   </button>
                                 </div>
-                              ) : null}
-                            </div>
-                            {publishLinks?.youtube ? (
-                              <div className="text-sm text-gray-300 break-words font-mono">{publishLinks.youtube}</div>
+                                <a
+                                  href={publishLinks.youtube}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-orange-600 hover:bg-orange-500 text-white font-bold text-sm transition-all"
+                                >
+                                  <ExternalLink className="w-4 h-4" /> Bekijk op YouTube
+                                </a>
+                              </>
                             ) : (
                               <div className="text-sm text-gray-500">Nog geen YouTube-link ontvangen.</div>
                             )}
                           </div>
 
-                          <div className="bg-white/5 border border-white/10 rounded-xl p-4">
-                            <div className="flex items-center justify-between mb-4 pb-4 border-b border-white/5">
-                              <h4 className="font-bold text-lg text-green-400 flex items-center gap-2"><Music className="w-4 h-4" /> Spotify</h4>
-                              {publishLinks?.spotify ? (
-                                <div className="flex items-center gap-2">
-                                  <a
-                                    href={publishLinks.spotify}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/70 hover:text-white transition-all flex items-center gap-2 text-xs font-mono uppercase tracking-widest"
-                                  >
-                                    <ExternalLink className="w-3 h-3" /> Open
-                                  </a>
+                          {/* Spotify */}
+                          <div className="bg-white/5 border border-white/10 rounded-xl p-4 flex flex-col gap-3">
+                            <h4 className="font-bold text-lg text-green-400 flex items-center gap-2">
+                              <Music className="w-4 h-4" /> Spotify
+                            </h4>
+                            {publishLinks?.spotify ? (
+                              <>
+                                <div className="flex items-center gap-2 bg-black/20 rounded-lg px-3 py-2">
+                                  <span className="text-sm text-gray-300 break-all font-mono flex-1">{publishLinks.spotify}</span>
                                   <button
                                     type="button"
                                     onClick={() => handleCopy('publish-spotify', publishLinks.spotify ?? '')}
-                                    className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/70 hover:text-white transition-all flex items-center gap-2 text-xs font-mono uppercase tracking-widest"
+                                    className="shrink-0 text-white/40 hover:text-white transition-colors"
+                                    title="Kopieer link"
                                   >
-                                    <Copy className="w-3 h-3" />
-                                    {copiedPlatform === 'publish-spotify' ? 'Gekopieerd' : 'Kopieer'}
+                                    {copiedPlatform === 'publish-spotify' ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
                                   </button>
                                 </div>
-                              ) : null}
-                            </div>
-                            {publishLinks?.spotify ? (
-                              <div className="text-sm text-gray-300 break-words font-mono">{publishLinks.spotify}</div>
+                                <a
+                                  href={publishLinks.spotify}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-green-600 hover:bg-green-500 text-white font-bold text-sm transition-all"
+                                >
+                                  <ExternalLink className="w-4 h-4" /> Bekijk op Spotify
+                                </a>
+                              </>
                             ) : (
-                              <div className="text-sm text-gray-500">Nog geen Spotify-link ontvangen.</div>
+                              <div className="text-sm text-gray-500 italic">Spotify-publicatie binnenkort beschikbaar.</div>
                             )}
                           </div>
                         </div>
+
+                        {/* Nieuwe aflevering starten */}
+                        {publishLinks?.youtube && (
+                          <div className="mt-6 pt-6 border-t border-white/10 flex justify-center">
+                            <button
+                              onClick={() => {
+                                setIsStarted(false);
+                                setSteps(prev => prev.map(s => ({ ...s, status: 'idle' })));
+                                setStepData({});
+                                setSelectedStepIndex(null);
+                                setIsApproved(false);
+                                setPublishLinks(null);
+                                setDriveUrl('');
+                                setLocalFile(null);
+                                setGuest('');
+                                setEpisodeNumber('');
+                                localStorage.removeItem('crime-station-state');
+                              }}
+                              className="flex items-center gap-2 px-6 py-3 rounded-lg border border-orange-600/40 bg-orange-600/10 text-orange-500 hover:bg-orange-600/20 font-bold transition-all"
+                            >
+                              <RotateCcw className="w-4 h-4" /> Nieuwe aflevering starten
+                            </button>
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <div>
@@ -918,15 +1083,68 @@ export default function App() {
                     )}
                   </motion.div>
                 ) : (
-                  <motion.div 
+                  <motion.div
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     className="flex flex-col items-center justify-center h-[400px] text-center"
                   >
                     <Loader2 className="w-12 h-12 text-orange-600 animate-spin mb-6" />
-                    <h3 className="text-2xl font-bold mb-2">Verwerking Bezig...</h3>
-                    <p className="text-gray-500">De agent voert momenteel {steps[currentStep].title.toLowerCase()} uit.</p>
+                    {steps[currentStep].title === 'Publiceren' ? (
+                      <>
+                        <h3 className="text-2xl font-bold mb-2">Uploaden naar YouTube...</h3>
+                        <p className="text-gray-500 max-w-sm">De video wordt nu geüpload. Dit kan enkele minuten duren afhankelijk van de bestandsgrootte.</p>
+                      </>
+                    ) : steps[currentStep].title === 'Transcriptie' ? (
+                      <>
+                        <h3 className="text-2xl font-bold mb-2">Transcriptie Bezig...</h3>
+                        <p className="text-gray-500 max-w-sm">Whisper transcribeert de audio. Voor een aflevering van ~1 uur duurt dit gemiddeld 5–10 minuten.</p>
+                      </>
+                    ) : steps[currentStep].title === 'Tekstgeneratie' ? (
+                      <>
+                        <h3 className="text-2xl font-bold mb-2">Teksten Genereren...</h3>
+                        <p className="text-gray-500 max-w-sm">Gemini analyseert het transcript en schrijft SEO-teksten voor YouTube en Spotify.</p>
+                      </>
+                    ) : (
+                      <>
+                        <h3 className="text-2xl font-bold mb-2">Verwerking Bezig...</h3>
+                        <p className="text-gray-500">De agent voert momenteel {steps[currentStep].title.toLowerCase()} uit.</p>
+                      </>
+                    )}
                   </motion.div>
+                )}
+
+                {/* Bevestigingsdialog publiceren */}
+                {showPublishConfirm && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="bg-zinc-900 border border-white/10 rounded-2xl p-8 max-w-md w-full mx-4 shadow-2xl"
+                    >
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className="w-10 h-10 bg-orange-600/20 rounded-xl flex items-center justify-center">
+                          <Youtube className="w-5 h-5 text-orange-500" />
+                        </div>
+                        <h3 className="text-xl font-bold">Publiceren naar YouTube</h3>
+                      </div>
+                      <p className="text-gray-400 mb-2 text-sm">De video wordt gepubliceerd met de gegenereerde titel, beschrijving en tags. De video verschijnt als <strong className="text-white">privé</strong> op YouTube.</p>
+                      <p className="text-gray-500 text-sm mb-6">Wil je de tekst eerst aanpassen? Klik op <span className="text-white font-medium">← Terug, tekst bewerken</span>.</p>
+                      <div className="flex gap-3">
+                        <button
+                          onClick={() => setShowPublishConfirm(false)}
+                          className="flex-1 border border-white/10 bg-white/5 hover:bg-white/10 text-white px-4 py-2.5 rounded-lg font-bold transition-all flex items-center justify-center gap-2"
+                        >
+                          ← Terug, tekst bewerken
+                        </button>
+                        <button
+                          onClick={() => { setShowPublishConfirm(false); handleApprove(); }}
+                          className="flex-1 bg-orange-600 hover:bg-orange-500 text-white px-4 py-2.5 rounded-lg font-bold transition-all flex items-center justify-center gap-2"
+                        >
+                          <Youtube className="w-4 h-4" /> Ja, publiceren
+                        </button>
+                      </div>
+                    </motion.div>
+                  </div>
                 )}
               </AnimatePresence>
             </div>
