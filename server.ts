@@ -359,7 +359,7 @@ async function startServer() {
 
   // Auth middleware — beschermt alle /api routes behalve login/logout/status
   const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const publicPaths = ['/api/auth/login', '/api/auth/logout', '/api/auth/me', '/api/auth/youtube', '/api/auth/youtube/status', '/oauth2callback'];
+    const publicPaths = ['/auth/login', '/auth/logout', '/auth/me', '/auth/youtube'];
     if (publicPaths.some(p => req.path.startsWith(p))) return next();
     if (req.session?.loggedIn) return next();
     res.status(401).json({ error: "Niet ingelogd" });
