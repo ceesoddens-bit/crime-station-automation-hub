@@ -194,10 +194,10 @@ export default function App() {
   // Geschatte duur per stap in seconden
   const getEstimatedSeconds = (stepIdx: number) => {
     const title = steps[stepIdx]?.title;
+    if (title === 'Video Compressie') return fileSizeMb ? Math.max(60, Math.round(fileSizeMb * 2.5)) : 300;
     if (title === 'Transcriptie') return fileSizeMb ? Math.max(120, Math.round(fileSizeMb * 5)) : 420;
     if (title === 'Tekstgeneratie') return 90;
-    if (title === 'Video Compressie') return 45;
-    if (title === 'Publiceren') return 120;
+    if (title === 'Publiceren') return 180;
     return 120;
   };
 
@@ -683,7 +683,7 @@ export default function App() {
                 <ul className="space-y-4 text-gray-400">
                   <li className="flex gap-3">
                     <CheckCircle2 className="w-5 h-5 text-orange-600 shrink-0" />
-                    <span>Download & Compressie (FFmpeg)</span>
+                    <span>Uploaden & Compressie</span>
                   </li>
                   <li className="flex gap-3">
                     <CheckCircle2 className="w-5 h-5 text-orange-600 shrink-0" />
@@ -691,11 +691,11 @@ export default function App() {
                   </li>
                   <li className="flex gap-3">
                     <CheckCircle2 className="w-5 h-5 text-orange-600 shrink-0" />
-                    <span>SEO Tekstgeneratie (YouTube/Spotify)</span>
+                    <span>SEO Tekstgeneratie</span>
                   </li>
                   <li className="flex gap-3">
                     <CheckCircle2 className="w-5 h-5 text-orange-600 shrink-0" />
-                    <span>Publicatie naar YouTube & Spotify</span>
+                    <span>Publicatie naar platformen</span>
                   </li>
                 </ul>
               </div>
@@ -1155,7 +1155,8 @@ export default function App() {
                     {/* Timer + voortgangsbalk */}
                     {(steps[currentStep].title === 'Video Compressie' || steps[currentStep].title === 'Transcriptie' || steps[currentStep].title === 'Tekstgeneratie' || steps[currentStep].title === 'Publiceren') && (() => {
                       const estimated = getEstimatedSeconds(currentStep);
-                      const progress = Math.min(elapsedSeconds / estimated, 0.97);
+                      // Asymptotische curve: altijd in beweging, nooit vastlopend
+                      const progress = 1 - Math.exp(-elapsedSeconds / (estimated * 0.6));
                       const remaining = Math.max(estimated - elapsedSeconds, 0);
                       return (
                         <div className="w-full max-w-sm space-y-3">
@@ -1164,7 +1165,7 @@ export default function App() {
                               className="h-full bg-orange-600 rounded-full"
                               initial={{ width: 0 }}
                               animate={{ width: `${progress * 100}%` }}
-                              transition={{ duration: 0.8, ease: 'easeOut' }}
+                              transition={{ duration: 1, ease: 'easeOut' }}
                             />
                           </div>
                           <div className="flex justify-between text-xs font-mono text-gray-500">
