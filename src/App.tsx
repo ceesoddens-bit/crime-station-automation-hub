@@ -63,6 +63,10 @@ export default function App() {
   const [currentRequestId, setCurrentRequestId] = useState('');
   const [isYoutubeLinked, setIsYoutubeLinked] = useState(false);
   const [hasSrt, setHasSrt] = useState(false);
+  const [authStatus, setAuthStatus] = useState<'loading' | 'loggedIn' | 'loggedOut'>('loading');
+  const [loginUser, setLoginUser] = useState('');
+  const [loginPass, setLoginPass] = useState('');
+  const [loginError, setLoginError] = useState('');
   const [spotifyShowUrl, setSpotifyShowUrl] = useState('');
   const [showSpotifyModal, setShowSpotifyModal] = useState(false);
   const [spotifyInput, setSpotifyInput] = useState('');
@@ -106,6 +110,28 @@ export default function App() {
     const saved = localStorage.getItem('crime-station-spotify-url');
     if (saved) setSpotifyShowUrl(saved);
   }, []);
+
+  useEffect(() => {
+    axios.get('/api/auth/me')
+      .then(res => setAuthStatus(res.data?.loggedIn ? 'loggedIn' : 'loggedOut'))
+      .catch(() => setAuthStatus('loggedOut'));
+  }, []);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError('');
+    try {
+      await axios.post('/api/auth/login', { username: loginUser, password: loginPass });
+      setAuthStatus('loggedIn');
+    } catch {
+      setLoginError('Gebruikersnaam of wachtwoord onjuist.');
+    }
+  };
+
+  const handleLogout = async () => {
+    await axios.post('/api/auth/logout');
+    setAuthStatus('loggedOut');
+  };
 
   useEffect(() => {
     const checkAuthStatus = () => {
@@ -194,8 +220,8 @@ export default function App() {
   // Geschatte duur per stap in seconden
   const getEstimatedSeconds = (stepIdx: number) => {
     const title = steps[stepIdx]?.title;
-    if (title === 'Video Compressie') return fileSizeMb ? Math.max(60, Math.round(fileSizeMb * 2.5)) : 300;
-    if (title === 'Transcriptie') return fileSizeMb ? Math.max(120, Math.round(fileSizeMb * 5)) : 420;
+    if (title === 'Video Compressie') return 180;
+    if (title === 'Transcriptie') return 420;
     if (title === 'Tekstgeneratie') return 90;
     if (title === 'Publiceren') return 180;
     return 120;
@@ -417,6 +443,83 @@ export default function App() {
     }
   };
 
+  // Loading screen
+  if (authStatus === 'loading') {
+    return (
+      <div className="min-h-screen bg-[#0a0a0a] text-white font-sans flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 bg-orange-600 rounded flex items-center justify-center font-bold text-2xl">CS</div>
+          <Loader2 className="w-6 h-6 text-orange-600 animate-spin" />
+        </div>
+      </div>
+    );
+  }
+
+  // Login screen
+  if (authStatus === 'loggedOut') {
+    return (
+      <div className="min-h-screen bg-[#0a0a0a] text-white font-sans selection:bg-orange-500/30 flex items-center justify-center px-4">
+        <div className="fixed inset-0 overflow-hidden pointer-events-none">
+          <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-orange-900/10 blur-[120px] rounded-full" />
+          <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-orange-900/10 blur-[120px] rounded-full" />
+        </div>
+        <motion.div
+          initial={{ opacity: 0, y: 24 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="relative z-10 w-full max-w-sm"
+        >
+          <div className="flex items-center gap-3 mb-10">
+            <div className="w-10 h-10 bg-orange-600 rounded flex items-center justify-center font-bold text-xl">CS</div>
+            <div>
+              <p className="text-xs font-mono tracking-widest uppercase opacity-50">Crime Station</p>
+              <p className="text-sm font-bold leading-none">Content Hub</p>
+            </div>
+          </div>
+          <h2 className="text-3xl font-bold tracking-tighter mb-2">Inloggen</h2>
+          <p className="text-gray-500 text-sm mb-8">Voer je gegevens in om toegang te krijgen.</p>
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-mono uppercase tracking-widest opacity-50">Gebruikersnaam</label>
+              <input
+                type="text"
+                value={loginUser}
+                onChange={e => setLoginUser(e.target.value)}
+                autoFocus
+                autoComplete="username"
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
+                placeholder="admin"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-mono uppercase tracking-widest opacity-50">Wachtwoord</label>
+              <input
+                type="password"
+                value={loginPass}
+                onChange={e => setLoginPass(e.target.value)}
+                autoComplete="current-password"
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors"
+                placeholder="••••••••"
+              />
+            </div>
+            {loginError && (
+              <div className="flex items-center gap-2 text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                {loginError}
+              </div>
+            )}
+            <button
+              type="submit"
+              disabled={!loginUser || !loginPass}
+              className="w-full bg-orange-600 hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-4 rounded-lg transition-all flex items-center justify-center gap-3 text-base uppercase tracking-tighter mt-2"
+            >
+              Inloggen <ChevronRight className="w-5 h-5" />
+            </button>
+          </form>
+        </motion.div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white font-sans selection:bg-orange-500/30">
       {/* Background Atmosphere */}
@@ -428,9 +531,17 @@ export default function App() {
       <main className="relative z-10 max-w-5xl mx-auto px-6 py-12">
         {/* Header */}
         <header className="mb-16">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 bg-orange-600 rounded flex items-center justify-center font-bold text-xl">CS</div>
-            <h1 className="text-sm font-mono tracking-widest uppercase opacity-50">Crime Station Automation</h1>
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-orange-600 rounded flex items-center justify-center font-bold text-xl">CS</div>
+              <h1 className="text-sm font-mono tracking-widest uppercase opacity-50">Crime Station Automation</h1>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="text-xs font-mono uppercase tracking-widest text-gray-500 hover:text-white border border-white/10 hover:border-white/30 px-3 py-1.5 rounded transition-colors"
+            >
+              Uitloggen
+            </button>
           </div>
           <h2 className="text-5xl md:text-7xl font-bold tracking-tighter leading-none mb-6">
             CONTENT <span className="text-orange-600">HUB</span>
