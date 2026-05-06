@@ -369,9 +369,12 @@ async function startServer() {
   // Login
   app.post('/api/auth/login', (req, res) => {
     const { username, password } = req.body;
-    const validUser = process.env.ADMIN_USERNAME || 'admin';
-    const validPass = process.env.ADMIN_PASSWORD || 'crimestation2026';
-    if (username === validUser && password === validPass) {
+    const accounts = [
+      { username: process.env.ADMIN_USERNAME || 'admin', password: process.env.ADMIN_PASSWORD || 'crimestation2026' },
+      { username: process.env.USER2_USERNAME || '', password: process.env.USER2_PASSWORD || '' },
+    ];
+    const match = accounts.find(a => a.username && username === a.username && password === a.password);
+    if (match) {
       req.session.loggedIn = true;
       req.session.username = username;
       res.json({ status: 'ok', username });
