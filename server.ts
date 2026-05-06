@@ -4,7 +4,6 @@ dotenv.config();
 
 import express from "express";
 import session from "express-session";
-import cookieParser from "cookie-parser";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { google } from "googleapis";
@@ -350,7 +349,6 @@ async function startServer() {
   const desiredPort = 3001;
   const desiredHmrPort = 24678;
 
-  app.use(cookieParser());
   app.use(express.json());
   app.use(session({
     secret: process.env.SESSION_SECRET || "fallback-secret",
