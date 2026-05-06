@@ -66,6 +66,9 @@ export default function App() {
   const [spotifyShowUrl, setSpotifyShowUrl] = useState('');
   const [showSpotifyModal, setShowSpotifyModal] = useState(false);
   const [spotifyInput, setSpotifyInput] = useState('');
+  const [stepStartTimes, setStepStartTimes] = useState<Record<number, number>>({});
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [fileSizeMb, setFileSizeMb] = useState<number | null>(null);
 
   // Load state from localStorage on mount
   useEffect(() => {
@@ -153,6 +156,12 @@ export default function App() {
     }
   }, [currentStep, isStarted]);
 
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
   const seriesOptions = [
     'Crime Insight',
     'Crime Report',
@@ -170,6 +179,27 @@ export default function App() {
     { id: 4, title: 'Goedkeuring', description: 'Review de gegenereerde content.', status: 'idle', icon: <CheckCircle2 className="w-5 h-5" /> },
     { id: 5, title: 'Publiceren', description: 'Uploaden naar YouTube en Spotify.', status: 'idle', icon: <Youtube className="w-5 h-5" /> },
   ]);
+
+  // Lopende timer voor actieve stap
+  useEffect(() => {
+    const processingIdx = steps.findIndex(s => s.status === 'processing');
+    if (processingIdx === -1) return;
+    const interval = setInterval(() => {
+      const start = stepStartTimes[processingIdx];
+      if (start) setElapsedSeconds(Math.floor((Date.now() - start) / 1000));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [steps, stepStartTimes]);
+
+  // Geschatte duur per stap in seconden
+  const getEstimatedSeconds = (stepIdx: number) => {
+    const title = steps[stepIdx]?.title;
+    if (title === 'Transcriptie') return fileSizeMb ? Math.max(120, Math.round(fileSizeMb * 5)) : 420;
+    if (title === 'Tekstgeneratie') return 90;
+    if (title === 'Video Compressie') return 45;
+    if (title === 'Publiceren') return 120;
+    return 120;
+  };
 
   const handleStart = async () => {
     if (videoSource === 'drive' && !driveUrl) return;
@@ -198,7 +228,7 @@ export default function App() {
         updateStepStatus(1, 'completed');
         updateStepStatus(2, 'completed');
         setStepData({
-          0: "Video is succesvol gedownload en gecomprimeerd naar 10MB (proxy voor verwerking).",
+          0: "Video succesvol geüpload.",
           1: data.data?.transcription || "Geen transcriptie beschikbaar.",
           2: data.data?.artifact
         });
@@ -229,6 +259,10 @@ export default function App() {
   const updateStepStatus = (index: number, status: StepStatus, errorMessage?: string) => {
     setSteps(prev => prev.map((s, i) => i === index ? { ...s, status, errorMessage } : s));
     setCurrentStep(index);
+    if (status === 'processing') {
+      setStepStartTimes(prev => ({ ...prev, [index]: Date.now() }));
+      setElapsedSeconds(0);
+    }
   };
 
   const handleApprove = async () => {
@@ -533,7 +567,7 @@ export default function App() {
                     <input 
                       type="file" 
                       accept="video/*,audio/*"
-                      onChange={(e) => setLocalFile(e.target.files?.[0] || null)}
+                      onChange={(e) => { const f = e.target.files?.[0] || null; setLocalFile(f); if (f) setFileSizeMb(f.size / 1024 / 1024); }}
                       className="absolute inset-0 opacity-0 cursor-pointer z-10"
                     />
                     <div className="flex items-center gap-4">
@@ -700,20 +734,23 @@ export default function App() {
                 >
                   <div className="flex items-center gap-4">
                     <div className={cn(
-                      "w-10 h-10 rounded-lg flex items-center justify-center",
-                      step.status === 'processing' ? "bg-orange-600 text-white" : 
+                      "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
+                      step.status === 'processing' ? "bg-orange-600 text-white" :
                       step.status === 'completed' ? "bg-green-500 text-white" :
                       step.status === 'waiting' ? "bg-blue-500 text-white" :
                       step.status === 'error' ? "bg-red-500 text-white" :
                       "bg-white/10 text-gray-400"
                     )}>
-                      {step.status === 'processing' ? <Loader2 className="w-5 h-5 animate-spin" /> : 
+                      {step.status === 'processing' ? <Loader2 className="w-5 h-5 animate-spin" /> :
                        step.status === 'completed' ? <Check className="w-5 h-5" /> :
                        step.status === 'error' ? <AlertCircle className="w-5 h-5" /> :
                        step.icon}
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <h4 className="font-bold text-sm">{step.title}</h4>
+                      {step.status === 'processing' && (step.title === 'Transcriptie' || step.title === 'Tekstgeneratie') && (
+                        <p className="text-xs text-orange-400 font-mono mt-0.5">{formatTime(elapsedSeconds)}</p>
+                      )}
                     </div>
                   </div>
                 </button>
@@ -770,7 +807,7 @@ export default function App() {
                         </div>
                       </div>
                       <div className="flex items-center gap-3">
-                        {selectedStepIndex === 2 && !isApproved && (
+                        {selectedStepIndex === 2 && !isApproved && steps[selectedStepIndex]?.title === 'Tekstgeneratie' && (
                           isEditing ? (
                             <button
                               onClick={() => {
@@ -801,7 +838,7 @@ export default function App() {
                             </>
                           )
                         )}
-                        {selectedStepIndex !== null && selectedStepIndex !== 2 && (
+                        {selectedStepIndex !== null && selectedStepIndex !== 0 && selectedStepIndex !== 2 && (
                           <button
                             onClick={() => {
                               if (isEditing) {
@@ -1086,30 +1123,61 @@ export default function App() {
                   <motion.div
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
-                    className="flex flex-col items-center justify-center h-[400px] text-center"
+                    className="flex flex-col items-center justify-center h-[400px] text-center px-8"
                   >
                     <Loader2 className="w-12 h-12 text-orange-600 animate-spin mb-6" />
                     {steps[currentStep].title === 'Publiceren' ? (
                       <>
                         <h3 className="text-2xl font-bold mb-2">Uploaden naar YouTube...</h3>
-                        <p className="text-gray-500 max-w-sm">De video wordt nu geüpload. Dit kan enkele minuten duren afhankelijk van de bestandsgrootte.</p>
+                        <p className="text-gray-500 max-w-sm mb-8">De video wordt nu geüpload. Dit kan enkele minuten duren.</p>
+                      </>
+                    ) : steps[currentStep].title === 'Video Compressie' ? (
+                      <>
+                        <h3 className="text-2xl font-bold mb-2">Video Compressie Bezig...</h3>
+                        <p className="text-gray-500 max-w-sm mb-8">De video wordt gedownload en gecomprimeerd via FFmpeg.</p>
                       </>
                     ) : steps[currentStep].title === 'Transcriptie' ? (
                       <>
                         <h3 className="text-2xl font-bold mb-2">Transcriptie Bezig...</h3>
-                        <p className="text-gray-500 max-w-sm">Whisper transcribeert de audio. Voor een aflevering van ~1 uur duurt dit gemiddeld 5–10 minuten.</p>
+                        <p className="text-gray-500 max-w-sm mb-8">Whisper transcribeert de audio. Voor een aflevering van ~1 uur duurt dit gemiddeld 5–10 minuten.</p>
                       </>
                     ) : steps[currentStep].title === 'Tekstgeneratie' ? (
                       <>
                         <h3 className="text-2xl font-bold mb-2">Teksten Genereren...</h3>
-                        <p className="text-gray-500 max-w-sm">Gemini analyseert het transcript en schrijft SEO-teksten voor YouTube en Spotify.</p>
+                        <p className="text-gray-500 max-w-sm mb-8">Gemini analyseert het transcript en schrijft SEO-teksten voor YouTube en Spotify.</p>
                       </>
                     ) : (
                       <>
                         <h3 className="text-2xl font-bold mb-2">Verwerking Bezig...</h3>
-                        <p className="text-gray-500">De agent voert momenteel {steps[currentStep].title.toLowerCase()} uit.</p>
+                        <p className="text-gray-500 mb-8">De agent voert momenteel {steps[currentStep].title.toLowerCase()} uit.</p>
                       </>
                     )}
+                    {/* Timer + voortgangsbalk */}
+                    {(steps[currentStep].title === 'Video Compressie' || steps[currentStep].title === 'Transcriptie' || steps[currentStep].title === 'Tekstgeneratie' || steps[currentStep].title === 'Publiceren') && (() => {
+                      const estimated = getEstimatedSeconds(currentStep);
+                      const progress = Math.min(elapsedSeconds / estimated, 0.97);
+                      const remaining = Math.max(estimated - elapsedSeconds, 0);
+                      return (
+                        <div className="w-full max-w-sm space-y-3">
+                          <div className="w-full bg-white/10 rounded-full h-2 overflow-hidden">
+                            <motion.div
+                              className="h-full bg-orange-600 rounded-full"
+                              initial={{ width: 0 }}
+                              animate={{ width: `${progress * 100}%` }}
+                              transition={{ duration: 0.8, ease: 'easeOut' }}
+                            />
+                          </div>
+                          <div className="flex justify-between text-xs font-mono text-gray-500">
+                            <span>⏱ Verstreken: <span className="text-white">{formatTime(elapsedSeconds)}</span></span>
+                            {elapsedSeconds < estimated ? (
+                              <span>Nog ~<span className="text-white">{formatTime(remaining)}</span></span>
+                            ) : (
+                              <span className="text-orange-400">Bijna klaar...</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </motion.div>
                 )}
 

@@ -288,11 +288,8 @@ function composeYoutubeDescription(youtube: any, chapterText: string, guest: str
     : "";
 
   const cta = `Heb je zelf een vraag voor Mick, Nancy of onze gasten? Mail naar mick@crimestation.nl of laat een reactie achter.
-
 • Abonneer je voor wekelijkse reportages en rechtbankverslagen.
-
 • Luister deze podcast op Spotify: [link]
-
 • Meer misdaadnieuws: www.crimestation.nl`;
 
   return [intro, chapterText, outro, cta, hashtags]
@@ -304,9 +301,7 @@ function composeSpotifyDescription(spotify: any, chapterText: string, guest: str
   const body = (spotify?.beschrijving || "").trim();
 
   const cta = `Heb je zelf een vraag voor Mick, Nancy of onze gasten? Mail naar mick@crimestation.nl.
-
 Waardeer je deze aflevering? Geef ons 5 sterren en klik op 'Volgen' om niets te missen.
-
 Meer misdaadnieuws: www.crimestation.nl`;
 
   return [body, chapterText, cta].filter(Boolean).join("\n\n");
@@ -484,109 +479,93 @@ async function startServer() {
         return lines.slice(0, 2).join("\n");
       };
 
-      // Build word → timestamp index by distributing each segment's time range evenly across its words
-      interface WordTimestamp { word: string; start: number; end: number; }
-      const wordTimestamps: WordTimestamp[] = [];
-      for (const seg of segments) {
-        const segWords = (seg.text || "").trim().split(/\s+/).filter(Boolean);
-        if (segWords.length === 0) continue;
-        const dur = (seg.end - seg.start) / segWords.length;
-        segWords.forEach((w: string, wi: number) => {
-          wordTimestamps.push({ word: w, start: seg.start + wi * dur, end: seg.start + (wi + 1) * dur });
-        });
-      }
+      // Voeg interpunctie toe via Gemini — stuur segmentteksten als JSON-array.
+      // Zo blijft segment N altijd segment N: nooit mapping-problemen of verloren woorden.
+      const rawSegmentTexts: string[] = segments.map((seg: any) =>
+        (seg.text || "").replace(/\[\d{1,2}:\d{2}(:\d{2})?\]/g, '').trim()
+      );
+      let punctuatedSegmentTexts: string[] = [...rawSegmentTexts]; // fallback = origineel
 
-      // Ask Gemini to add punctuation — one word per line to prevent deletions
-      let punctuatedText = transcription;
       try {
-        const wordList = transcription.trim().split(/\s+/);
-        const numberedWords = wordList.map((w, i) => `${i + 1}. ${w}`).join('\n');
-        const punctPrompt = `Hieronder staat een Nederlandse gesproken transcriptie, één woord per regel met een regelnummer.
+        const inputJson = JSON.stringify(rawSegmentTexts);
+        const punctPrompt = `Je krijgt een JSON-array met segmenten van een Nederlandse gesproken transcriptie.
 
-Jouw taak: geef EXACT hetzelfde aantal regels terug, in EXACT dezelfde volgorde. Verander het woord op elke regel NIET. Voeg alleen interpunctie toe AAN HET EINDE van een woord als dat nodig is (punt, komma, vraagteken, uitroepteken). Zet het eerste woord van een nieuwe zin met een hoofdletter. Geef ALLEEN de genummerde lijst terug, niets anders.
+Taak: geef EXACT dezelfde array terug, met EXACT hetzelfde aantal elementen, in dezelfde volgorde. Verander de woorden NIET. Voeg alleen interpunctie toe (punt, komma, vraagteken, uitroepteken) op de juiste plekken binnen elk segment. Zet het eerste woord van een nieuwe zin met een hoofdletter. Geef ALLEEN de JSON-array terug, niets anders.
 
-${numberedWords}`;
+${inputJson}`;
+
         const punctResp = await generateWithFallback(
           (model) => ai.models.generateContent({
             model,
             contents: [{ role: "user", parts: [{ text: punctPrompt }] }],
-            config: { temperature: 0.1 },
+            config: { temperature: 0.1, responseMimeType: "application/json" },
           }),
           "gemini-2.5-flash",
           "gemini-2.5-pro",
         );
+
         const candidate = (punctResp.text || "").trim();
-        // Parse numbered lines back to words
-        const parsedWords = candidate.split('\n')
-          .map(line => line.replace(/^\d+\.\s*/, '').trim())
-          .filter(Boolean);
-        if (parsedWords.length >= wordList.length * 0.95 && parsedWords.length <= wordList.length * 1.05) {
-          punctuatedText = parsedWords.join(' ');
-          console.log(`[${requestId}] Gemini punctuation applied (${wordList.length}→${parsedWords.length} words).`);
+        const parsed: string[] = JSON.parse(candidate);
+        if (Array.isArray(parsed) && parsed.length === rawSegmentTexts.length) {
+          punctuatedSegmentTexts = parsed.map(s => String(s));
+          console.log(`[${requestId}] Gemini punctuation applied (${parsed.length} segmenten).`);
         } else {
-          console.warn(`[${requestId}] Gemini punctuation rejected (lines: ${wordList.length}→${parsedWords.length}), using original.`);
+          console.warn(`[${requestId}] Gemini punctuation rejected (verwacht ${rawSegmentTexts.length} segmenten, kreeg ${Array.isArray(parsed) ? parsed.length : '?'}), gebruik origineel.`);
         }
       } catch (e: any) {
-        console.warn(`[${requestId}] Gemini punctuation failed, using original: ${e.message}`);
+        console.warn(`[${requestId}] Gemini punctuation mislukt, gebruik origineel: ${e.message}`);
       }
 
-      // Split punctuated text into sentences at sentence-ending punctuation
-      const sentenceRegex = /[^.!?]+[.!?]+/g;
-      const rawSentences: string[] = [];
-      let m: RegExpExecArray | null;
-      while ((m = sentenceRegex.exec(punctuatedText)) !== null) {
-        const s = m[0].trim();
-        if (s) rawSentences.push(s);
-      }
-      // Append any trailing text that has no sentence-ending punctuation
-      const lastMatch = punctuatedText.trimEnd().search(/[.!?][^.!?]*$/);
-      const trailingText = lastMatch >= 0 ? punctuatedText.slice(lastMatch + 1).trim() : punctuatedText.trim();
-      if (trailingText && rawSentences.length > 0) {
-        // Append to last sentence if it's short, otherwise add as new entry
-        if (trailingText.split(/\s+/).length < 5) {
-          rawSentences[rawSentences.length - 1] += " " + trailingText;
-        } else {
-          rawSentences.push(trailingText);
-        }
-      }
-      const sentences = rawSentences.length > 0 ? rawSentences : [punctuatedText];
-
-      // Match each sentence's first word back to wordTimestamps for start time
-      const normalizeWord = (w: string) => w.toLowerCase().replace(/[^a-z0-9]/g, "");
-      let wordIdx = 0;
+      // Bouw SRT op: segmenten samenvoegen aan zinsgrenzen, timing 100% van Whisper.
       interface SentenceEntry { text: string; start: number; end: number; }
       const sentenceEntries: SentenceEntry[] = [];
+      let currentWords: string[] = [];
+      let sentenceStart = segments[0]?.start ?? 0;
+      let sentenceEndTime = 0;
 
-      for (let si = 0; si < sentences.length; si++) {
-        const sentWords = sentences[si].split(/\s+/).filter(Boolean);
-        const firstNorm = normalizeWord(sentWords[0] || "");
-        // Scan forward in wordTimestamps to find matching word
-        let foundIdx = -1;
-        for (let wi = wordIdx; wi < Math.min(wordIdx + 30, wordTimestamps.length); wi++) {
-          if (normalizeWord(wordTimestamps[wi].word) === firstNorm) { foundIdx = wi; break; }
+      for (let si = 0; si < segments.length; si++) {
+        const segText = punctuatedSegmentTexts[si] || rawSegmentTexts[si];
+        const segWords = segText.trim().split(/\s+/).filter(Boolean);
+
+        for (let wi = 0; wi < segWords.length; wi++) {
+          const word = segWords[wi];
+          currentWords.push(word);
+          sentenceEndTime = segments[si]?.end ?? sentenceEndTime;
+
+          const isSentenceEnd = /[.!?]$/.test(word);
+          const isVeryLastWord = si === segments.length - 1 && wi === segWords.length - 1;
+
+          if (isSentenceEnd || isVeryLastWord) {
+            if (currentWords.length > 0) {
+              sentenceEntries.push({
+                text: currentWords.join(' '),
+                start: sentenceStart,
+                end: sentenceEndTime,
+              });
+              currentWords = [];
+              // Volgende zin begint precies aan het begin van het volgende segment (of dit segment als er nog woorden volgen)
+              sentenceStart = wi < segWords.length - 1 ? segments[si]?.start ?? sentenceEndTime : segments[si + 1]?.start ?? sentenceEndTime;
+            }
+          }
         }
-        if (foundIdx === -1) {
-          // Fallback: use current wordIdx position
-          foundIdx = Math.min(wordIdx, wordTimestamps.length - 1);
-        }
-        const startTime = wordTimestamps[foundIdx]?.start ?? (sentenceEntries[si - 1]?.end ?? 0);
-
-        // Find end time: advance wordIdx by sentence word count
-        wordIdx = foundIdx + sentWords.length;
-        const endTime = wordTimestamps[Math.min(wordIdx - 1, wordTimestamps.length - 1)]?.end ?? startTime + 3;
-
-        sentenceEntries.push({ text: sentences[si], start: startTime, end: endTime });
       }
 
-      // Ensure end of last entry covers the actual audio end
-      if (sentenceEntries.length > 0 && wordTimestamps.length > 0) {
-        sentenceEntries[sentenceEntries.length - 1].end = wordTimestamps[wordTimestamps.length - 1].end;
+      // Eventuele resterende woorden toevoegen (geen afsluitend leesteken)
+      if (currentWords.length > 0) {
+        sentenceEntries.push({
+          text: currentWords.join(' '),
+          start: sentenceStart,
+          end: segments[segments.length - 1]?.end ?? sentenceEndTime,
+        });
       }
 
       const srtContent = sentenceEntries.map((entry, i) => {
         const text = wrapSrtText(entry.text);
         return `${i + 1}\n${srtFmt(entry.start)} --> ${srtFmt(entry.end)}\n${text}\n`;
       }).join("\n");
+
+      // Leesbare tekst voor de UI
+      const punctuatedText = punctuatedSegmentTexts.join(' ');
 
       console.log(`[${requestId}] Transcription completed (${segments.length} segmenten).`);
 
