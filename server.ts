@@ -3,6 +3,8 @@ import path from "path";
 dotenv.config();
 
 import express from "express";
+import session from "express-session";
+import cookieParser from "cookie-parser";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { google } from "googleapis";
@@ -11,6 +13,11 @@ import fs from "fs";
 import net from "net";
 import axios from "axios";
 import multer from "multer";
+
+// Session type uitbreiden
+declare module "express-session" {
+  interface SessionData { loggedIn: boolean; username: string; }
+}
 
 // Configure multer for file uploads - 10GB limit
 const upload = multer({ 
@@ -128,29 +135,48 @@ function formatTimestamp(seconds: number): string {
  * min. 60s tussen hoofdstukken, max 12 hoofdstukken, tijdstempels uit blokken.
  */
 function buildChapterList(
-  rawChapters: Array<{ block_id: number; title: string }> | undefined,
-  blocks: Block[]
+  rawChapters: Array<{ segment_id?: string; block_id?: number; title: string }> | undefined,
+  blocks: Block[],
+  segments: Segment[] = []
 ): Chapter[] {
   if (!Array.isArray(rawChapters) || blocks.length === 0) {
     return [{ start: 0, title: "Introductie", block_id: 0 }];
   }
 
   const valid: Chapter[] = [];
-  const seenBlocks = new Set<number>();
+  const seenIds = new Set<string>();
 
   for (const ch of rawChapters) {
-    const blockId = Number(ch.block_id);
     const title = (ch.title || "").toString().trim();
     if (!title) continue;
-    if (!Number.isFinite(blockId) || blockId < 0 || blockId >= blocks.length) continue;
-    if (seenBlocks.has(blockId)) continue;
 
-    seenBlocks.add(blockId);
-    valid.push({
-      start: blocks[blockId].start,
-      title,
-      block_id: blockId,
-    });
+    let startTime: number | null = null;
+    let blockId = 0;
+
+    // Segment-gebaseerde timestamp (nauwkeurig)
+    if (ch.segment_id && typeof ch.segment_id === 'string') {
+      const segIdx = parseInt(ch.segment_id.replace('seg', ''), 10);
+      if (Number.isFinite(segIdx) && segIdx >= 0 && segIdx < segments.length) {
+        startTime = segments[segIdx].start;
+        blockId = segIdx;
+      }
+    }
+
+    // Fallback: block-gebaseerde timestamp
+    if (startTime === null && ch.block_id !== undefined) {
+      const bId = Number(ch.block_id);
+      if (Number.isFinite(bId) && bId >= 0 && bId < blocks.length) {
+        startTime = blocks[bId].start;
+        blockId = bId;
+      }
+    }
+
+    if (startTime === null) continue;
+    const key = `${startTime}`;
+    if (seenIds.has(key)) continue;
+    seenIds.add(key);
+
+    valid.push({ start: startTime, title, block_id: blockId });
   }
 
   valid.sort((a, b) => a.start - b.start);
@@ -208,12 +234,18 @@ Houd het bondig maar inhoudelijk. Geen sensatietaal.`;
 
 function buildCopyPrompt(opts: {
   series: string; host1: string; host2: string; guest: string; episodeNumber: string;
-  analysis: string; blocks: Block[];
+  analysis: string; blocks: Block[]; segments: Segment[];
 }): string {
   const isNoGuest = !opts.guest || opts.guest.trim().toLowerCase() === "geen gast";
 
+  // Blokken van 30s voor contentbegrip
   const blocksText = opts.blocks
-    .map(b => `[${b.id}] (${formatTimestamp(b.start)}) ${b.text.slice(0, 350)}`)
+    .map(b => `[${b.id}] (${formatTimestamp(b.start)}) ${b.text.slice(0, 120)}`)
+    .join("\n");
+
+  // Segmenten voor nauwkeurige chapter-timestamps (elke 3-8s)
+  const segmentsText = opts.segments
+    .map((s, i) => `[seg${i}] (${formatTimestamp(s.start)}) ${(s.text || "").trim().slice(0, 80)}`)
     .join("\n");
 
   return `Je bent redacteur voor Crime Station, een Nederlandse journalistieke true-crime podcast. Je schrijft titel, beschrijving en hoofdstukindeling voor één aflevering.
@@ -227,8 +259,11 @@ ${isNoGuest ? "Geen gast." : `Gast: ${opts.guest}`}
 ANALYSE VAN DEZE AFLEVERING
 ${opts.analysis}
 
-BLOKKEN UIT DE AFLEVERING (genummerd, met starttijd en eerste woorden):
+BLOKKEN UIT DE AFLEVERING (voor inhoudsbegrip — genummerd, met starttijd):
 ${blocksText}
+
+SEGMENTEN VOOR HOOFDSTUK-TIMESTAMPS (gebruik deze voor exacte starttijden):
+${segmentsText}
 
 ---
 
@@ -249,11 +284,12 @@ TITEL-VOORBEELDEN (juiste toon voor YouTube)
 - "Waarom deze cold case na dertig jaar weer wordt heropend"
 
 HOOFDSTUKKEN (chapters)
-- Selecteer 5 tot 10 blokken uit de lijst die een nieuw inhoudelijk onderwerp markeren.
-- Gebruik het exacte block_id uit de lijst hierboven — verzin géén tijdstempels.
-- Eerste hoofdstuk is altijd "Introductie" (block_id 0).
+- Selecteer 5 tot 10 momenten waarop een nieuw inhoudelijk onderwerp begint.
+- Gebruik de BLOKKEN lijst om de inhoud te begrijpen en te bepalen welke onderwerpen er zijn.
+- Gebruik daarna de SEGMENTEN lijst om het exacte segment te vinden waar dat onderwerp begint — kies het segment waar de spreker het onderwerp voor het EERST introduceert.
+- Geef het segment_id terug als "seg0", "seg12", etc.
+- Eerste hoofdstuk is altijd "Introductie" met segment_id "seg0".
 - Titels zijn kort (2-6 woorden), beschrijvend, journalistiek van toon.
-- Hoofdstuktitels volgen de inhoud van dat blok, niet een samenvatting van de hele aflevering.
 
 OUTPUT
 Geef alléén valid JSON terug, exact in dit format:
@@ -271,9 +307,9 @@ Geef alléén valid JSON terug, exact in dit format:
     "beschrijving": "Zelfstandige beschrijving voor Spotify-luisteraars (5-8 zinnen). Geen hoofdstukken — die voegen we later toe. Focus op wat je leert of ervaart tijdens het luisteren."
   },
   "chapters": [
-    {"block_id": 0, "title": "Introductie"},
-    {"block_id": 7, "title": "..."},
-    {"block_id": 14, "title": "..."}
+    {"segment_id": "seg0", "title": "Introductie"},
+    {"segment_id": "seg42", "title": "..."},
+    {"segment_id": "seg87", "title": "..."}
   ]
 }
 
@@ -314,7 +350,51 @@ async function startServer() {
   const desiredPort = 3001;
   const desiredHmrPort = 24678;
 
+  app.use(cookieParser());
   app.use(express.json());
+  app.use(session({
+    secret: process.env.SESSION_SECRET || "fallback-secret",
+    resave: false,
+    saveUninitialized: false,
+    cookie: { secure: false, httpOnly: true, maxAge: 7 * 24 * 60 * 60 * 1000 }, // 7 dagen
+  }));
+
+  // Auth middleware — beschermt alle /api routes behalve login/logout/status
+  const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const publicPaths = ['/api/auth/login', '/api/auth/logout', '/api/auth/me', '/api/auth/youtube', '/api/auth/youtube/status', '/oauth2callback'];
+    if (publicPaths.some(p => req.path.startsWith(p))) return next();
+    if (req.session?.loggedIn) return next();
+    res.status(401).json({ error: "Niet ingelogd" });
+  };
+  app.use('/api', requireAuth);
+
+  // Login
+  app.post('/api/auth/login', (req, res) => {
+    const { username, password } = req.body;
+    const validUser = process.env.ADMIN_USERNAME || 'admin';
+    const validPass = process.env.ADMIN_PASSWORD || 'crimestation2026';
+    if (username === validUser && password === validPass) {
+      req.session.loggedIn = true;
+      req.session.username = username;
+      res.json({ status: 'ok', username });
+    } else {
+      res.status(401).json({ error: 'Gebruikersnaam of wachtwoord onjuist' });
+    }
+  });
+
+  // Logout
+  app.post('/api/auth/logout', (req, res) => {
+    req.session.destroy(() => res.json({ status: 'ok' }));
+  });
+
+  // Check sessiestatus
+  app.get('/api/auth/me', (req, res) => {
+    if (req.session?.loggedIn) {
+      res.json({ loggedIn: true, username: req.session.username });
+    } else {
+      res.json({ loggedIn: false });
+    }
+  });
 
   const findAvailablePort = async (startPort: number, host: string) => {
     for (let port = startPort; port < startPort + 50; port += 1) {
@@ -377,6 +457,11 @@ async function startServer() {
     }
   });
 
+  // Hulpfunctie: verwijder bestand veilig (geen fout als het niet bestaat)
+  const safeDelete = (filePath: string) => {
+    try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
+  };
+
   app.post("/api/process", upload.single('videoFile'), async (req, res) => {
     const { series, host1, host2, guest, episodeNumber } = req.body;
     const uploadedFile = req.file;
@@ -386,6 +471,14 @@ async function startServer() {
 
     try {
       if (!uploadedFile) throw new Error("Geen bestand geüpload.");
+
+      // Valideer bestandstype op basis van MIME type
+      const allowedMimes = ['video/', 'audio/'];
+      if (!allowedMimes.some(prefix => (uploadedFile.mimetype || '').startsWith(prefix))) {
+        safeDelete(uploadedFile.path);
+        throw new Error(`Ongeldig bestandstype: ${uploadedFile.mimetype}. Alleen video- en audiobestanden zijn toegestaan.`);
+      }
+
       const sourceFile = uploadedFile.path;
 
       // Step 1: Audio extractie — altijd naar 16kHz mono MP3 (matches WhisperX input)
@@ -443,6 +536,11 @@ async function startServer() {
       }
 
       const whisperData = await whisperResp.json() as any;
+
+      // Audio bestand direct verwijderen na transcriptie — niet meer nodig
+      safeDelete(audioOutput);
+      console.log(`[${requestId}] Audio bestand verwijderd na transcriptie.`);
+
       if (whisperData.status !== "success") {
         throw new Error(`Whisper transcriptie mislukt: ${whisperData.detail || "onbekende fout"}`);
       }
@@ -573,7 +671,7 @@ ${inputJson}`;
       currentStep = 2;
 
       // Step 3a: Segmenten groeperen tot semantische blokken
-      const blocks = buildBlocks(segments, 60, 3.0);
+      const blocks = buildBlocks(segments, 30, 2.0);
       console.log(`[${requestId}] ${blocks.length} blokken gebouwd.`);
 
       // Step 3b: Analyse-stap (flash) — begrijp de aflevering eerst
@@ -593,7 +691,7 @@ ${inputJson}`;
 
       // Step 3c: Copy + chapter block-ids (pro)
       const copyPrompt = buildCopyPrompt({
-        series, host1, host2, guest, episodeNumber, analysis, blocks,
+        series, host1, host2, guest, episodeNumber, analysis, blocks, segments,
       });
       console.log(`[${requestId}] Running copy stage...`);
       const copyResp = await generateWithFallback(
@@ -616,7 +714,7 @@ ${inputJson}`;
       }
 
       // Step 3d: Chapters valideren + timestamps server-side bouwen
-      const chapterList = buildChapterList(parsedCopy.chapters, blocks);
+      const chapterList = buildChapterList(parsedCopy.chapters, blocks, segments);
       const chapterText = chapterList.map(c => `${formatTimestamp(c.start)} ${c.title}`).join("\n");
 
       // Beschrijving samenstellen: intro + chapters + rest
@@ -662,6 +760,9 @@ ${inputJson}`;
         }
       });
     } catch (error: any) {
+      // Ruim tijdelijke bestanden op bij fout
+      safeDelete(audioOutput);
+      if (uploadedFile?.path) safeDelete(uploadedFile.path);
       console.error(`[${requestId}] Error at step ${currentStep}:`, error);
       res.status(500).json({
         error: error.message || "Processing failed",
@@ -745,6 +846,10 @@ ${inputJson}`;
 
       // Sla videoId op zodat we later de beschrijving kunnen updaten (bijv. Spotify link)
       fs.writeFileSync(metaFile, JSON.stringify({ ...meta, youtubeVideoId: videoId }));
+
+      // Originele videobestand verwijderen na succesvolle upload — niet meer nodig
+      safeDelete(videoPath);
+      console.log(`[requestId] Originele video verwijderd na YouTube upload: ${videoPath}`);
 
       res.json({ status: "completed", links: { youtube: `https://youtube.com/watch?v=${videoId}` } });
     } catch (error: any) {
