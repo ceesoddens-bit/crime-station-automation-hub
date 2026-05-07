@@ -40,8 +40,11 @@ type PublishLinks = {
 };
 
 export default function App() {
-  const [videoSource, setVideoSource] = useState<'drive' | 'local'>('drive');
+  const [videoSource, setVideoSource] = useState<'drive' | 'local'>('local');
   const [driveUrl, setDriveUrl] = useState('');
+  const [customSeries, setCustomSeries] = useState('');
+  const [customHost1, setCustomHost1] = useState('');
+  const [customHost2, setCustomHost2] = useState('');
   const [localFile, setLocalFile] = useState<File | null>(null);
   const [series, setSeries] = useState('Crime Insight');
   const [host1, setHost1] = useState('');
@@ -651,63 +654,51 @@ export default function App() {
           >
             <div className="space-y-8">
               <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Bron Video</label>
-                  <div className="flex gap-4">
-                    <button 
-                      onClick={() => { setVideoSource('drive'); }}
-                      className={cn("text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border transition-all", videoSource === 'drive' ? "bg-orange-600 border-orange-600 text-white" : "border-white/10 text-white/40 hover:text-white")}
-                    >Google Drive</button>
-                    <button 
-                      onClick={() => { setVideoSource('local'); }}
-                      className={cn("text-[10px] font-mono uppercase tracking-tighter px-2 py-1 rounded border transition-all", videoSource === 'local' ? "bg-orange-600 border-orange-600 text-white" : "border-white/10 text-white/40 hover:text-white")}
-                    >Lokaal Bestand</button>
-                  </div>
-                </div>
-                
-                {videoSource === 'drive' ? (
-                  <input 
-                    type="text" 
-                    placeholder="https://drive.google.com/..."
-                    value={driveUrl}
-                    onChange={(e) => setDriveUrl(e.target.value)}
-                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors text-lg"
+                <label className="text-xs font-mono uppercase tracking-widest opacity-50">Video Bestand</label>
+                <div className="relative group overflow-hidden bg-white/5 border border-white/10 rounded-lg p-4 cursor-pointer hover:border-orange-600 transition-all">
+                  <input
+                    type="file"
+                    accept="video/*,audio/*"
+                    onChange={(e) => { const f = e.target.files?.[0] || null; setLocalFile(f); if (f) setFileSizeMb(f.size / 1024 / 1024); }}
+                    className="absolute inset-0 opacity-0 cursor-pointer z-10"
                   />
-                ) : (
-                  <div className="relative group overflow-hidden bg-white/5 border border-white/10 rounded-lg p-4 cursor-pointer hover:border-orange-600 transition-all">
-                    <input 
-                      type="file" 
-                      accept="video/*,audio/*"
-                      onChange={(e) => { const f = e.target.files?.[0] || null; setLocalFile(f); if (f) setFileSizeMb(f.size / 1024 / 1024); }}
-                      className="absolute inset-0 opacity-0 cursor-pointer z-10"
-                    />
-                    <div className="flex items-center gap-4">
-                      <div className="w-10 h-10 bg-orange-600/20 rounded flex items-center justify-center text-orange-600">
-                        <Video className="w-5 h-5" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-bold truncate max-w-[200px]">
-                          {localFile ? localFile.name : "Kies een bestand..."}
-                        </p>
-                        <p className="text-[10px] opacity-40 uppercase tracking-widest">
-                          {localFile ? `${(localFile.size / 1024 / 1024).toFixed(1)} MB` : "Klik of sleep hier"}
-                        </p>
-                      </div>
+                  <div className="flex items-center gap-4">
+                    <div className="w-10 h-10 bg-orange-600/20 rounded flex items-center justify-center text-orange-600">
+                      <Video className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold truncate max-w-[200px]">
+                        {localFile ? localFile.name : "Kies een bestand..."}
+                      </p>
+                      <p className="text-[10px] opacity-40 uppercase tracking-widest">
+                        {localFile ? `${(localFile.size / 1024 / 1024).toFixed(1)} MB` : "Klik of sleep hier"}
+                      </p>
                     </div>
                   </div>
-                )}
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div className="space-y-2">
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Serie</label>
-                  <select 
-                    value={series}
-                    onChange={(e) => setSeries(e.target.value)}
+                  <select
+                    value={seriesOptions.includes(series) ? series : '__custom__'}
+                    onChange={(e) => { if (e.target.value === '__custom__') { setSeries(''); } else { setSeries(e.target.value); setCustomSeries(''); } }}
                     className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
                   >
                     {seriesOptions.map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
+                    <option value="__custom__" className="bg-zinc-900">Anders, namelijk...</option>
                   </select>
+                  {(!seriesOptions.includes(series)) && (
+                    <input
+                      type="text"
+                      placeholder="Vul serie naam in..."
+                      value={series}
+                      onChange={(e) => setSeries(e.target.value)}
+                      className="w-full bg-white/5 border border-orange-600/50 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors text-sm"
+                      autoFocus
+                    />
+                  )}
                 </div>
                 <div className="space-y-2">
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Aflevering #</label>
@@ -722,25 +713,63 @@ export default function App() {
                 </div>
                 <div className="space-y-2">
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 1</label>
-                  <select
-                    value={host1}
-                    onChange={(e) => setHost1(e.target.value)}
-                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
-                  >
-                    <option value="" className="bg-zinc-900">— Solo / geen presentator —</option>
-                    {['Mick van Wely', 'Nancy Dekens', 'Aziz Akhath', 'Wickey van der Meijden', 'Arthur Brand', 'Lena Olivier', 'Roy Regterschot'].map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
-                  </select>
+                  {(() => {
+                    const hostOptions = ['Mick van Wely', 'Nancy Dekens', 'Aziz Akhath', 'Wickey van der Meijden', 'Arthur Brand', 'Lena Olivier', 'Roy Regterschot'];
+                    const isCustom = host1 !== '' && !hostOptions.includes(host1);
+                    return (
+                      <>
+                        <select
+                          value={isCustom ? '__custom__' : host1}
+                          onChange={(e) => { if (e.target.value === '__custom__') { setHost1(''); } else { setHost1(e.target.value); } }}
+                          className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
+                        >
+                          <option value="" className="bg-zinc-900">— Solo / geen presentator —</option>
+                          {hostOptions.map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
+                          <option value="__custom__" className="bg-zinc-900">Anders, namelijk...</option>
+                        </select>
+                        {isCustom && (
+                          <input
+                            type="text"
+                            placeholder="Naam presentator..."
+                            value={host1}
+                            onChange={(e) => setHost1(e.target.value)}
+                            className="w-full bg-white/5 border border-orange-600/50 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors text-sm"
+                            autoFocus
+                          />
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
                 <div className="space-y-2">
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 2</label>
-                  <select 
-                    value={host2}
-                    onChange={(e) => setHost2(e.target.value)}
-                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
-                  >
-                    <option value="" className="bg-zinc-900">Geen / Leeg laten</option>
-                    {['Mick van Wely', 'Nancy Dekens', 'Aziz Akhath', 'Wickey van der Meijden', 'Arthur Brand', 'Lena Olivier', 'Roy Regterschot'].map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
-                  </select>
+                  {(() => {
+                    const hostOptions = ['Mick van Wely', 'Nancy Dekens', 'Aziz Akhath', 'Wickey van der Meijden', 'Arthur Brand', 'Lena Olivier', 'Roy Regterschot'];
+                    const isCustom = host2 !== '' && !hostOptions.includes(host2);
+                    return (
+                      <>
+                        <select
+                          value={isCustom ? '__custom__' : host2}
+                          onChange={(e) => { if (e.target.value === '__custom__') { setHost2(''); } else { setHost2(e.target.value); } }}
+                          className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
+                        >
+                          <option value="" className="bg-zinc-900">Geen / Leeg laten</option>
+                          {hostOptions.map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
+                          <option value="__custom__" className="bg-zinc-900">Anders, namelijk...</option>
+                        </select>
+                        {isCustom && (
+                          <input
+                            type="text"
+                            placeholder="Naam presentator..."
+                            value={host2}
+                            onChange={(e) => setHost2(e.target.value)}
+                            className="w-full bg-white/5 border border-orange-600/50 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors text-sm"
+                            autoFocus
+                          />
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
                 <div className="space-y-2 sm:col-span-2">
                   <div className="flex items-center justify-between gap-3">
@@ -775,7 +804,7 @@ export default function App() {
               <div className="space-y-2">
                 <button
                   onClick={handleStart}
-                  disabled={(videoSource === 'drive' && !driveUrl) || (videoSource === 'local' && !localFile) || !isYoutubeLinked}
+                  disabled={!localFile || !isYoutubeLinked}
                   className="w-full bg-orange-600 hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-5 rounded-lg transition-all flex items-center justify-center gap-3 text-xl uppercase tracking-tighter"
                 >
                   Start Verwerking <Play className="w-6 h-6 fill-current" />
