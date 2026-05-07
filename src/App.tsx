@@ -978,7 +978,21 @@ export default function App() {
                                   <Youtube className="w-4 h-4" /> Publiceren <ChevronRight className="w-4 h-4" />
                                 </button>
                               ) : (
-                                <span className="text-xs text-gray-500 italic">Kies een profiel om te publiceren</span>
+                                <div className="flex items-center gap-2">
+                                  <select
+                                    value=""
+                                    onChange={e => { if (e.target.value) setSelectedProfileId(e.target.value); }}
+                                    className="bg-white/5 border border-orange-600/50 text-orange-400 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:border-orange-600 transition-colors appearance-none"
+                                  >
+                                    <option value="" className="bg-zinc-900 text-gray-400">Kies profiel...</option>
+                                    {profiles.map(p => (
+                                      <option key={p.id} value={p.id} className="bg-zinc-900 text-white">{p.name}</option>
+                                    ))}
+                                    {profiles.length === 0 && (
+                                      <option disabled className="bg-zinc-900 text-gray-500">Geen profielen — maak aan via Instellingen</option>
+                                    )}
+                                  </select>
+                                </div>
                               )}
                             </>
                           )
