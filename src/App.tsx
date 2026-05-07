@@ -266,9 +266,9 @@ export default function App() {
       } else if (videoSource === 'drive') {
         formData.append('driveUrl', driveUrl);
       }
-      formData.append('series', series);
-      formData.append('host1', host1);
-      formData.append('host2', host2);
+      formData.append('series', series === '__custom__' ? customSeries : series);
+      formData.append('host1', host1 === '__custom__' ? customHost1 : host1);
+      formData.append('host2', host2 === '__custom__' ? customHost2 : host2);
       formData.append('guest', guest);
       formData.append('episodeNumber', episodeNumber);
 
@@ -632,19 +632,19 @@ export default function App() {
                 <div className="space-y-2">
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Serie</label>
                   <select
-                    value={seriesOptions.includes(series) ? series : '__custom__'}
-                    onChange={(e) => { if (e.target.value === '__custom__') { setSeries(''); } else { setSeries(e.target.value); setCustomSeries(''); } }}
+                    value={series === '__custom__' ? '__custom__' : (seriesOptions.includes(series) ? series : 'Crime Insight')}
+                    onChange={(e) => { if (e.target.value === '__custom__') { setSeries('__custom__'); setCustomSeries(''); } else { setSeries(e.target.value); setCustomSeries(''); } }}
                     className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
                   >
                     {seriesOptions.map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
                     <option value="__custom__" className="bg-zinc-900">Anders, namelijk...</option>
                   </select>
-                  {(!seriesOptions.includes(series)) && (
+                  {series === '__custom__' && (
                     <input
                       type="text"
                       placeholder="Vul serie naam in..."
-                      value={series}
-                      onChange={(e) => setSeries(e.target.value)}
+                      value={customSeries}
+                      onChange={(e) => setCustomSeries(e.target.value)}
                       className="w-full bg-white/5 border border-orange-600/50 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors text-sm"
                       autoFocus
                     />
@@ -665,24 +665,23 @@ export default function App() {
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 1</label>
                   {(() => {
                     const hostOptions = ['Mick van Wely', 'Nancy Dekens', 'Aziz Akhath', 'Wickey van der Meijden', 'Arthur Brand', 'Lena Olivier', 'Roy Regterschot'];
-                    const isCustom = host1 !== '' && !hostOptions.includes(host1);
                     return (
                       <>
                         <select
-                          value={isCustom ? '__custom__' : host1}
-                          onChange={(e) => { if (e.target.value === '__custom__') { setHost1(''); } else { setHost1(e.target.value); } }}
+                          value={host1 === '__custom__' ? '__custom__' : (hostOptions.includes(host1) ? host1 : '')}
+                          onChange={(e) => { if (e.target.value === '__custom__') { setHost1('__custom__'); setCustomHost1(''); } else { setHost1(e.target.value); setCustomHost1(''); } }}
                           className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
                         >
                           <option value="" className="bg-zinc-900">— Solo / geen presentator —</option>
                           {hostOptions.map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
                           <option value="__custom__" className="bg-zinc-900">Anders, namelijk...</option>
                         </select>
-                        {isCustom && (
+                        {host1 === '__custom__' && (
                           <input
                             type="text"
                             placeholder="Naam presentator..."
-                            value={host1}
-                            onChange={(e) => setHost1(e.target.value)}
+                            value={customHost1}
+                            onChange={(e) => setCustomHost1(e.target.value)}
                             className="w-full bg-white/5 border border-orange-600/50 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors text-sm"
                             autoFocus
                           />
@@ -695,24 +694,23 @@ export default function App() {
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 2</label>
                   {(() => {
                     const hostOptions = ['Mick van Wely', 'Nancy Dekens', 'Aziz Akhath', 'Wickey van der Meijden', 'Arthur Brand', 'Lena Olivier', 'Roy Regterschot'];
-                    const isCustom = host2 !== '' && !hostOptions.includes(host2);
                     return (
                       <>
                         <select
-                          value={isCustom ? '__custom__' : host2}
-                          onChange={(e) => { if (e.target.value === '__custom__') { setHost2(''); } else { setHost2(e.target.value); } }}
+                          value={host2 === '__custom__' ? '__custom__' : (hostOptions.includes(host2) ? host2 : '')}
+                          onChange={(e) => { if (e.target.value === '__custom__') { setHost2('__custom__'); setCustomHost2(''); } else { setHost2(e.target.value); setCustomHost2(''); } }}
                           className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
                         >
                           <option value="" className="bg-zinc-900">Geen / Leeg laten</option>
                           {hostOptions.map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
                           <option value="__custom__" className="bg-zinc-900">Anders, namelijk...</option>
                         </select>
-                        {isCustom && (
+                        {host2 === '__custom__' && (
                           <input
                             type="text"
                             placeholder="Naam presentator..."
-                            value={host2}
-                            onChange={(e) => setHost2(e.target.value)}
+                            value={customHost2}
+                            onChange={(e) => setCustomHost2(e.target.value)}
                             className="w-full bg-white/5 border border-orange-600/50 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors text-sm"
                             autoFocus
                           />

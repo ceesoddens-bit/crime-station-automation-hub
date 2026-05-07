@@ -140,23 +140,29 @@ export default function SettingsPage({ profiles, onClose, onProfilesChange }: Pr
                             <Youtube className="w-3 h-3" /> Koppel YouTube
                           </a>
                         )}
-                        {/* Spotify status */}
-                        {p.spotifyUrl ? (
-                          <span className="flex items-center gap-1.5 text-xs font-mono uppercase bg-green-600/20 text-green-500 border border-green-500/30 px-2.5 py-1 rounded">
-                            <Check className="w-3 h-3" /> Spotify ingesteld
-                          </span>
-                        ) : (
-                          <span className="flex items-center gap-1.5 text-xs font-mono uppercase bg-white/5 text-gray-500 border border-white/10 px-2.5 py-1 rounded">
-                            <Music className="w-3 h-3" /> Geen Spotify-link
+                        {/* Spotify status — alleen tonen als Spotify publicatie aan staat */}
+                        {p.publishSpotify && (
+                          p.spotifyUrl ? (
+                            <span className="flex items-center gap-1.5 text-xs font-mono uppercase bg-green-600/20 text-green-500 border border-green-500/30 px-2.5 py-1 rounded">
+                              <Check className="w-3 h-3" /> Spotify ingesteld
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1.5 text-xs font-mono uppercase bg-orange-600/20 text-orange-400 border border-orange-500/30 px-2.5 py-1 rounded">
+                              <Music className="w-3 h-3" /> Spotify-link ontbreekt
+                            </span>
+                          )
+                        )}
+                        {/* Platform badges — alleen actieve platforms tonen */}
+                        {p.publishYoutube && (
+                          <span className="text-xs font-mono uppercase px-2 py-0.5 rounded border bg-orange-600/20 text-orange-400 border-orange-500/30">
+                            YouTube
                           </span>
                         )}
-                        {/* Platform badges */}
-                        <span className={cn("text-xs font-mono uppercase px-2 py-0.5 rounded border", p.publishYoutube ? "bg-orange-600/20 text-orange-400 border-orange-500/30" : "bg-white/5 text-gray-600 border-white/10 line-through")}>
-                          YouTube
-                        </span>
-                        <span className={cn("text-xs font-mono uppercase px-2 py-0.5 rounded border", p.publishSpotify ? "bg-green-600/20 text-green-400 border-green-500/30" : "bg-white/5 text-gray-600 border-white/10 line-through")}>
-                          Spotify
-                        </span>
+                        {p.publishSpotify && (
+                          <span className="text-xs font-mono uppercase px-2 py-0.5 rounded border bg-green-600/20 text-green-400 border-green-500/30">
+                            Spotify
+                          </span>
+                        )}
                       </div>
                       {p.spotifyUrl && (
                         <p className="text-xs text-gray-600 mt-2 truncate">{p.spotifyUrl}</p>
@@ -224,7 +230,7 @@ export default function SettingsPage({ profiles, onClose, onProfilesChange }: Pr
                 </div>
 
                 <div className="space-y-2">
-                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Spotify Show URL</label>
+                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Podcastserie URL (Spotify)</label>
                   <input
                     type="url"
                     value={form.spotifyUrl}
