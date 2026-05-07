@@ -755,25 +755,19 @@ export default function App() {
               <div className="space-y-4 bg-white/5 border border-white/10 rounded-xl p-4">
                 <div className="space-y-2">
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Kanaal / Profiel</label>
-                  {profiles.length === 0 ? (
-                    <button
-                      type="button"
-                      onClick={() => setShowSettings(true)}
-                      className="w-full text-left bg-white/5 border border-orange-600/40 rounded-lg px-4 py-3 text-sm text-orange-400 hover:bg-orange-600/10 transition-colors"
-                    >
-                      + Maak eerst een profiel aan in Instellingen
-                    </button>
-                  ) : (
-                    <select
-                      value={selectedProfileId}
-                      onChange={e => setSelectedProfileId(e.target.value)}
-                      className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors appearance-none text-sm"
-                    >
-                      {profiles.map(p => (
-                        <option key={p.id} value={p.id} className="bg-zinc-900">{p.name}</option>
-                      ))}
-                    </select>
-                  )}
+                  <select
+                    value={selectedProfileId}
+                    onChange={e => setSelectedProfileId(e.target.value)}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors appearance-none text-sm"
+                  >
+                    <option value="" className="bg-zinc-900">— Geen profiel (alleen transcriptie) —</option>
+                    {profiles.map(p => (
+                      <option key={p.id} value={p.id} className="bg-zinc-900">{p.name}</option>
+                    ))}
+                    {profiles.length === 0 && (
+                      <option disabled className="bg-zinc-900 text-gray-500">Nog geen profielen — maak aan via Instellingen</option>
+                    )}
+                  </select>
                 </div>
 
                 <div className="space-y-2">
@@ -808,19 +802,19 @@ export default function App() {
               <div className="space-y-2">
                 <button
                   onClick={handleStart}
-                  disabled={!localFile || (publishToYoutube && !isYoutubeLinked) || profiles.length === 0}
+                  disabled={!localFile}
                   className="w-full bg-orange-600 hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-5 rounded-lg transition-all flex items-center justify-center gap-3 text-xl uppercase tracking-tighter"
                 >
                   Start Verwerking <Play className="w-6 h-6 fill-current" />
                 </button>
-                {publishToYoutube && !isYoutubeLinked && profiles.length > 0 && (
-                  <p className="text-xs text-red-400 text-center flex items-center justify-center gap-1">
-                    <AlertCircle className="w-3 h-3" /> Koppel het YouTube-account voor dit profiel via Instellingen
+                {!selectedProfileId && (
+                  <p className="text-xs text-gray-500 text-center flex items-center justify-center gap-1">
+                    Zonder profiel kan je alleen transcriberen — publiceren is niet mogelijk
                   </p>
                 )}
-                {profiles.length === 0 && (
-                  <p className="text-xs text-orange-400 text-center flex items-center justify-center gap-1">
-                    <AlertCircle className="w-3 h-3" /> Maak eerst een profiel aan via Instellingen
+                {selectedProfileId && publishToYoutube && !isYoutubeLinked && (
+                  <p className="text-xs text-red-400 text-center flex items-center justify-center gap-1">
+                    <AlertCircle className="w-3 h-3" /> Koppel het YouTube-account voor dit profiel via Instellingen
                   </p>
                 )}
               </div>
@@ -978,12 +972,16 @@ export default function App() {
                               >
                                 <Pencil className="w-4 h-4" /> Tekst bewerken
                               </button>
-                              <button
-                                onClick={() => setShowPublishConfirm(true)}
-                                className="bg-orange-600 hover:bg-orange-500 text-white px-5 py-2 rounded-lg font-bold transition-all flex items-center gap-2"
-                              >
-                                <Youtube className="w-4 h-4" /> Publiceren <ChevronRight className="w-4 h-4" />
-                              </button>
+                              {selectedProfileId ? (
+                                <button
+                                  onClick={() => setShowPublishConfirm(true)}
+                                  className="bg-orange-600 hover:bg-orange-500 text-white px-5 py-2 rounded-lg font-bold transition-all flex items-center gap-2"
+                                >
+                                  <Youtube className="w-4 h-4" /> Publiceren <ChevronRight className="w-4 h-4" />
+                                </button>
+                              ) : (
+                                <span className="text-xs text-gray-500 italic">Kies een profiel om te publiceren</span>
+                              )}
                             </>
                           )
                         )}
