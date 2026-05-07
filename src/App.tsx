@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { cn } from './lib/utils';
-import { 
-  Play, 
-  RotateCcw, 
-  CheckCircle2, 
-  Clock, 
-  AlertCircle, 
+import {
+  Play,
+  RotateCcw,
+  CheckCircle2,
+  Clock,
+  AlertCircle,
   ExternalLink,
   ChevronRight,
   FileText,
@@ -18,10 +18,12 @@ import {
   Check,
   Copy,
   Pencil,
-  Globe
+  Globe,
+  Settings
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
+import SettingsPage, { type Profile } from './SettingsPage';
 
 type StepStatus = 'idle' | 'processing' | 'completed' | 'error' | 'waiting';
 
@@ -76,6 +78,11 @@ export default function App() {
   const [stepStartTimes, setStepStartTimes] = useState<Record<number, number>>({});
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [fileSizeMb, setFileSizeMb] = useState<number | null>(null);
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [selectedProfileId, setSelectedProfileId] = useState<string>('');
+  const [publishToYoutube, setPublishToYoutube] = useState(true);
+  const [publishToSpotify, setPublishToSpotify] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   // Load state from localStorage on mount
   useEffect(() => {
@@ -120,6 +127,27 @@ export default function App() {
       .catch(() => setAuthStatus('loggedOut'));
   }, []);
 
+  useEffect(() => {
+    if (authStatus === 'loggedIn') {
+      axios.get('/api/profiles').then(res => {
+        setProfiles(res.data);
+        if (res.data.length > 0 && !selectedProfileId) {
+          setSelectedProfileId(res.data[0].id);
+          setPublishToYoutube(res.data[0].publishYoutube);
+          setPublishToSpotify(res.data[0].publishSpotify);
+        }
+      }).catch(() => {});
+    }
+  }, [authStatus]);
+
+  useEffect(() => {
+    const profile = profiles.find(p => p.id === selectedProfileId);
+    if (profile) {
+      setPublishToYoutube(profile.publishYoutube);
+      setPublishToSpotify(profile.publishSpotify);
+    }
+  }, [selectedProfileId]);
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
@@ -136,16 +164,11 @@ export default function App() {
     setAuthStatus('loggedOut');
   };
 
+  // YouTube linked wordt afgeleid van het geselecteerde profiel
+  const selectedProfile = profiles.find(p => p.id === selectedProfileId) ?? null;
   useEffect(() => {
-    const checkAuthStatus = () => {
-      axios.get('/api/auth/youtube/status')
-        .then(res => setIsYoutubeLinked(!!res.data?.linked))
-        .catch(e => console.error("Could not check youtube auth status", e));
-    };
-    checkAuthStatus();
-    window.addEventListener('focus', checkAuthStatus);
-    return () => window.removeEventListener('focus', checkAuthStatus);
-  }, []);
+    setIsYoutubeLinked(!!selectedProfile?.youtubeLinked);
+  }, [selectedProfile]);
 
   useEffect(() => {
     if (guest.trim()) {
@@ -313,9 +336,10 @@ export default function App() {
         console.warn("Kon bewerkte tekst niet parsen, server gebruikt opgeslagen versie");
       }
 
+      payload.profileId = selectedProfileId;
       const response = await axios.post('/api/publish/youtube', payload);
       const data = response.data;
-      
+
       if (data.status === 'completed') {
         updateStepStatus(4, 'completed');
         const links = (data?.links ?? {}) as PublishLinks;
@@ -323,10 +347,10 @@ export default function App() {
         const spotifyUrl = typeof links.spotify === 'string' ? links.spotify : undefined;
         setPublishLinks({ youtube: youtubeUrl, spotify: spotifyUrl });
 
-        // Vul [link] in de YouTube beschrijving met de Spotify URL (per-aflevering of show-URL als fallback)
-        const resolvedSpotifyUrl = spotifyUrl || spotifyShowUrl || null;
+        // Vul [link] in de YouTube beschrijving met de Spotify URL van het profiel
+        const resolvedSpotifyUrl = spotifyUrl || selectedProfile?.spotifyUrl || spotifyShowUrl || null;
         if (youtubeUrl && resolvedSpotifyUrl) {
-          axios.post('/api/publish/update-spotify-link', { requestId: currentRequestId, spotifyUrl: resolvedSpotifyUrl })
+          axios.post('/api/publish/update-spotify-link', { requestId: currentRequestId, spotifyUrl: resolvedSpotifyUrl, profileId: selectedProfileId })
             .catch(e => console.warn("Spotify link update mislukt:", e));
         }
         setStepData(prev => ({
@@ -523,6 +547,16 @@ export default function App() {
     );
   }
 
+  if (showSettings) {
+    return (
+      <SettingsPage
+        profiles={profiles}
+        onClose={() => { setShowSettings(false); axios.get('/api/profiles').then(r => setProfiles(r.data)); }}
+        onProfilesChange={setProfiles}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white font-sans selection:bg-orange-500/30">
       {/* Background Atmosphere */}
@@ -539,12 +573,20 @@ export default function App() {
               <div className="w-10 h-10 bg-orange-600 rounded flex items-center justify-center font-bold text-xl">CS</div>
               <h1 className="text-sm font-mono tracking-widest uppercase opacity-50">Crime Station Automation</h1>
             </div>
-            <button
-              onClick={handleLogout}
-              className="text-xs font-mono uppercase tracking-widest text-gray-500 hover:text-white border border-white/10 hover:border-white/30 px-3 py-1.5 rounded transition-colors"
-            >
-              Uitloggen
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowSettings(true)}
+                className="text-xs font-mono uppercase tracking-widest text-gray-500 hover:text-white border border-white/10 hover:border-white/30 px-3 py-1.5 rounded transition-colors flex items-center gap-2"
+              >
+                <Settings className="w-3.5 h-3.5" /> Instellingen
+              </button>
+              <button
+                onClick={handleLogout}
+                className="text-xs font-mono uppercase tracking-widest text-gray-500 hover:text-white border border-white/10 hover:border-white/30 px-3 py-1.5 rounded transition-colors"
+              >
+                Uitloggen
+              </button>
+            </div>
           </div>
           <h2 className="text-5xl md:text-7xl font-bold tracking-tighter leading-none mb-6">
             CONTENT <span className="text-orange-600">HUB</span>
@@ -552,99 +594,7 @@ export default function App() {
           <p className="text-gray-400 max-w-xl text-lg">
             Autonome verwerking van video naar podcast en SEO-geoptimaliseerde content.
           </p>
-          <div className="mt-4 flex flex-wrap gap-3">
-            {/* YouTube */}
-            {isYoutubeLinked ? (
-              <div className="text-xs font-mono uppercase bg-green-600/20 text-green-500 border border-green-500/30 px-3 py-1.5 rounded flex items-center gap-2">
-                <Check className="w-3 h-3" /> YouTube Gekoppeld
-              </div>
-            ) : (
-              <a href="/api/auth/youtube" target="_blank" rel="noopener noreferrer" className="text-xs font-mono uppercase bg-red-600/20 text-red-500 border border-red-500/30 px-3 py-1.5 rounded flex items-center gap-2 hover:bg-red-600/40 transition-colors">
-                <Youtube className="w-3 h-3" /> Koppel YouTube Account (Eenmalig)
-              </a>
-            )}
-
-            {/* Spotify */}
-            {spotifyShowUrl ? (
-              <button
-                onClick={() => { setSpotifyInput(spotifyShowUrl); setShowSpotifyModal(true); }}
-                className="text-xs font-mono uppercase bg-green-600/20 text-green-500 border border-green-500/30 px-3 py-1.5 rounded flex items-center gap-2 hover:bg-green-600/30 transition-colors"
-              >
-                <Check className="w-3 h-3" /> Spotify Gekoppeld
-              </button>
-            ) : (
-              <button
-                onClick={() => { setSpotifyInput(''); setShowSpotifyModal(true); }}
-                className="text-xs font-mono uppercase bg-red-600/20 text-red-500 border border-red-500/30 px-3 py-1.5 rounded flex items-center gap-2 hover:bg-red-600/40 transition-colors"
-              >
-                <Music className="w-3 h-3" /> Koppel Spotify Podcast (Eenmalig)
-              </button>
-            )}
-          </div>
         </header>
-
-        {/* Spotify modal */}
-        <AnimatePresence>
-          {showSpotifyModal && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
-              onClick={() => setShowSpotifyModal(false)}
-            >
-              <motion.div
-                initial={{ scale: 0.95, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.95, opacity: 0 }}
-                className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-full max-w-md"
-                onClick={e => e.stopPropagation()}
-              >
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="w-8 h-8 bg-green-600 rounded flex items-center justify-center">
-                    <Music className="w-4 h-4 text-white" />
-                  </div>
-                  <h3 className="text-lg font-bold">Spotify Podcast Koppelen</h3>
-                </div>
-                <p className="text-sm text-gray-400 mb-4">
-                  Voer de URL in van je Spotify podcast show. Deze wordt automatisch gebruikt in beschrijvingen en links.
-                </p>
-                <input
-                  type="url"
-                  value={spotifyInput}
-                  onChange={e => setSpotifyInput(e.target.value)}
-                  placeholder="https://open.spotify.com/show/..."
-                  className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-green-500 mb-4"
-                  autoFocus
-                />
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setShowSpotifyModal(false)}
-                    className="flex-1 px-4 py-2.5 text-sm text-gray-400 border border-zinc-700 rounded-lg hover:bg-zinc-800 transition-colors"
-                  >
-                    Annuleren
-                  </button>
-                  <button
-                    onClick={() => {
-                      const url = spotifyInput.trim();
-                      if (url) {
-                        setSpotifyShowUrl(url);
-                        localStorage.setItem('crime-station-spotify-url', url);
-                      } else {
-                        setSpotifyShowUrl('');
-                        localStorage.removeItem('crime-station-spotify-url');
-                      }
-                      setShowSpotifyModal(false);
-                    }}
-                    className="flex-1 px-4 py-2.5 text-sm font-semibold bg-green-600 hover:bg-green-500 text-white rounded-lg transition-colors"
-                  >
-                    {spotifyInput.trim() ? 'Opslaan' : 'Ontkoppelen'}
-                  </button>
-                </div>
-              </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
 
         {!isStarted ? (
           <motion.section 
@@ -801,17 +751,76 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Profiel & platform selectie */}
+              <div className="space-y-4 bg-white/5 border border-white/10 rounded-xl p-4">
+                <div className="space-y-2">
+                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Kanaal / Profiel</label>
+                  {profiles.length === 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowSettings(true)}
+                      className="w-full text-left bg-white/5 border border-orange-600/40 rounded-lg px-4 py-3 text-sm text-orange-400 hover:bg-orange-600/10 transition-colors"
+                    >
+                      + Maak eerst een profiel aan in Instellingen
+                    </button>
+                  ) : (
+                    <select
+                      value={selectedProfileId}
+                      onChange={e => setSelectedProfileId(e.target.value)}
+                      className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors appearance-none text-sm"
+                    >
+                      {profiles.map(p => (
+                        <option key={p.id} value={p.id} className="bg-zinc-900">{p.name}</option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Publiceren naar</label>
+                  <div className="flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setPublishToYoutube(v => !v)}
+                      className={cn(
+                        "flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg border font-bold text-sm transition-all",
+                        publishToYoutube ? "bg-orange-600/20 border-orange-600/50 text-orange-400" : "bg-white/5 border-white/10 text-gray-500"
+                      )}
+                    >
+                      <Youtube className="w-4 h-4" /> YouTube
+                      {publishToYoutube && <Check className="w-3 h-3" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPublishToSpotify(v => !v)}
+                      className={cn(
+                        "flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg border font-bold text-sm transition-all",
+                        publishToSpotify ? "bg-green-600/20 border-green-600/50 text-green-400" : "bg-white/5 border-white/10 text-gray-500"
+                      )}
+                    >
+                      <Music className="w-4 h-4" /> Spotify
+                      {publishToSpotify && <Check className="w-3 h-3" />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               <div className="space-y-2">
                 <button
                   onClick={handleStart}
-                  disabled={!localFile || !isYoutubeLinked}
+                  disabled={!localFile || (publishToYoutube && !isYoutubeLinked) || profiles.length === 0}
                   className="w-full bg-orange-600 hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-5 rounded-lg transition-all flex items-center justify-center gap-3 text-xl uppercase tracking-tighter"
                 >
                   Start Verwerking <Play className="w-6 h-6 fill-current" />
                 </button>
-                {!isYoutubeLinked && (
+                {publishToYoutube && !isYoutubeLinked && profiles.length > 0 && (
                   <p className="text-xs text-red-400 text-center flex items-center justify-center gap-1">
-                    <AlertCircle className="w-3 h-3" /> Koppel eerst je YouTube account via de knop bovenaan
+                    <AlertCircle className="w-3 h-3" /> Koppel het YouTube-account voor dit profiel via Instellingen
+                  </p>
+                )}
+                {profiles.length === 0 && (
+                  <p className="text-xs text-orange-400 text-center flex items-center justify-center gap-1">
+                    <AlertCircle className="w-3 h-3" /> Maak eerst een profiel aan via Instellingen
                   </p>
                 )}
               </div>

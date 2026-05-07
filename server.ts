@@ -419,49 +419,91 @@ async function startServer() {
   const dataDir = path.join(process.cwd(), "data");
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
 
+  // Hulpfunctie: verwijder bestand veilig (geen fout als het niet bestaat)
+  const safeDelete = (filePath: string) => {
+    try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
+  };
+
   const oauth2Client = new google.auth.OAuth2(
     process.env.YOUTUBE_CLIENT_ID,
     process.env.YOUTUBE_CLIENT_SECRET,
     `${process.env.APP_URL}/oauth2callback`
   );
 
-  const tokensPath = path.join(dataDir, "youtube_token.json");
-  if (fs.existsSync(tokensPath)) {
-    try {
-      const tokens = JSON.parse(fs.readFileSync(tokensPath, 'utf8'));
-      oauth2Client.setCredentials(tokens);
-    } catch(e) {}
+  // --- Profiles ---
+  interface Profile {
+    id: string;
+    name: string;
+    spotifyUrl: string;
+    publishYoutube: boolean;
+    publishSpotify: boolean;
   }
+  const profilesPath = path.join(dataDir, 'profiles.json');
+  const loadProfiles = (): Profile[] => {
+    if (!fs.existsSync(profilesPath)) return [];
+    try { return JSON.parse(fs.readFileSync(profilesPath, 'utf8')); } catch { return []; }
+  };
+  const saveProfiles = (profiles: Profile[]) => fs.writeFileSync(profilesPath, JSON.stringify(profiles, null, 2));
+  const getTokenPath = (profileId: string) => path.join(dataDir, `youtube_token_${profileId}.json`);
 
+  app.get('/api/profiles', (_req, res) => {
+    const profiles = loadProfiles();
+    res.json(profiles.map(p => ({ ...p, youtubeLinked: fs.existsSync(getTokenPath(p.id)) })));
+  });
+  app.post('/api/profiles', (req, res) => {
+    const { name, spotifyUrl, publishYoutube, publishSpotify } = req.body;
+    if (!name) return res.status(400).json({ error: 'Naam is verplicht' });
+    const profiles = loadProfiles();
+    const p: Profile = { id: Date.now().toString(), name, spotifyUrl: spotifyUrl || '', publishYoutube: publishYoutube !== false, publishSpotify: !!publishSpotify };
+    profiles.push(p);
+    saveProfiles(profiles);
+    res.json({ ...p, youtubeLinked: false });
+  });
+  app.put('/api/profiles/:id', (req, res) => {
+    const profiles = loadProfiles();
+    const idx = profiles.findIndex(p => p.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Profiel niet gevonden' });
+    const { name, spotifyUrl, publishYoutube, publishSpotify } = req.body;
+    profiles[idx] = { ...profiles[idx], name, spotifyUrl, publishYoutube, publishSpotify };
+    saveProfiles(profiles);
+    res.json({ ...profiles[idx], youtubeLinked: fs.existsSync(getTokenPath(profiles[idx].id)) });
+  });
+  app.delete('/api/profiles/:id', (req, res) => {
+    const profiles = loadProfiles().filter(p => p.id !== req.params.id);
+    saveProfiles(profiles);
+    safeDelete(getTokenPath(req.params.id));
+    res.json({ status: 'ok' });
+  });
+
+  // --- YouTube OAuth (per profiel) ---
   app.get("/api/auth/youtube", (req, res) => {
+    const profileId = (req.query.profileId as string) || 'default';
     const url = oauth2Client.generateAuthUrl({
       access_type: "offline",
       scope: ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.force-ssl"],
-      prompt: 'consent'
+      prompt: 'consent',
+      state: profileId
     });
     res.redirect(url);
   });
 
   app.get("/api/auth/youtube/status", (req, res) => {
-    res.json({ linked: fs.existsSync(tokensPath) });
+    const profileId = (req.query.profileId as string) || 'default';
+    res.json({ linked: fs.existsSync(getTokenPath(profileId)) });
   });
 
   app.get("/oauth2callback", async (req, res) => {
-    const code = req.query.code;
+    const code = req.query.code as string;
+    const profileId = (req.query.state as string) || 'default';
     try {
-      const { tokens } = await oauth2Client.getToken(code as string);
+      const { tokens } = await oauth2Client.getToken(code);
       oauth2Client.setCredentials(tokens);
-      fs.writeFileSync(tokensPath, JSON.stringify(tokens));
-      res.send("<h1>Succesvol gekoppeld!</h1><p>Je kunt dit venster sluiten en teruggaan naar de Crime Station Hub.</p><script>setTimeout(() => window.close(), 3000)</script>");
+      fs.writeFileSync(getTokenPath(profileId), JSON.stringify(tokens));
+      res.send(`<h1>Succesvol gekoppeld!</h1><p>YouTube account is gekoppeld aan profiel. Je kunt dit venster sluiten.</p><script>setTimeout(() => window.close(), 3000)</script>`);
     } catch (e: any) {
       res.status(500).send("Fout tijdens koppeling: " + e.message);
     }
   });
-
-  // Hulpfunctie: verwijder bestand veilig (geen fout als het niet bestaat)
-  const safeDelete = (filePath: string) => {
-    try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
-  };
 
   app.post("/api/process", upload.single('videoFile'), async (req, res) => {
     const { series, host1, host2, guest, episodeNumber } = req.body;
@@ -785,7 +827,7 @@ ${inputJson}`;
 
   app.post("/api/publish/youtube", async (req, res) => {
     try {
-      const { requestId, youtubeOverride } = req.body;
+      const { requestId, youtubeOverride, profileId } = req.body;
       if (!requestId) throw new Error("Geen requestId meegegeven.");
 
       const metaFile = path.join(dataDir, `meta_${requestId}.json`);
@@ -795,6 +837,17 @@ ${inputJson}`;
       const { videoPath, artifact } = meta;
       if (!fs.existsSync(videoPath)) throw new Error("Originele videobestand is niet meer beschikbaar.");
 
+      // Laad het juiste YouTube token voor dit profiel
+      const tokenPath = getTokenPath(profileId || 'default');
+      if (!fs.existsSync(tokenPath)) throw new Error("YouTube account niet gekoppeld voor dit profiel.");
+      const profileTokens = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+      const profileOauth = new google.auth.OAuth2(
+        process.env.YOUTUBE_CLIENT_ID,
+        process.env.YOUTUBE_CLIENT_SECRET,
+        `${process.env.APP_URL}/oauth2callback`
+      );
+      profileOauth.setCredentials(profileTokens);
+
       // Gebruik bewerkte versie van de frontend als die beschikbaar is, anders de opgeslagen versie
       const youtube = youtubeOverride ?? artifact?.youtube ?? {};
       const tags = Array.isArray(youtube.tags) ? youtube.tags : (typeof youtube.tags === 'string' ? youtube.tags.split(',').map((t: string) => t.trim()) : []);
@@ -802,7 +855,7 @@ ${inputJson}`;
       const youtubeApi = google.youtube('v3');
 
       const response = await youtubeApi.videos.insert({
-        auth: oauth2Client,
+        auth: profileOauth,
         part: ['snippet', 'status'],
         requestBody: {
           snippet: {
@@ -828,7 +881,7 @@ ${inputJson}`;
       if (fs.existsSync(srtPath)) {
         try {
           await youtubeApi.captions.insert({
-            auth: oauth2Client,
+            auth: profileOauth,
             part: ['snippet'],
             requestBody: {
               snippet: {
@@ -862,7 +915,7 @@ ${inputJson}`;
   // Update YouTube beschrijving met Spotify link zodra die beschikbaar is
   app.post("/api/publish/update-spotify-link", async (req, res) => {
     try {
-      const { requestId, spotifyUrl } = req.body;
+      const { requestId, spotifyUrl, profileId } = req.body;
       if (!requestId || !spotifyUrl) throw new Error("requestId en spotifyUrl zijn verplicht.");
 
       const metaFile = path.join(dataDir, `meta_${requestId}.json`);
@@ -871,11 +924,21 @@ ${inputJson}`;
       const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
       if (!meta.youtubeVideoId) throw new Error("Geen YouTube video ID gevonden — eerst publiceren naar YouTube.");
 
+      const tokenPath = getTokenPath(profileId || 'default');
+      if (!fs.existsSync(tokenPath)) throw new Error("YouTube token niet gevonden.");
+      const profileTokens = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+      const profileOauth = new google.auth.OAuth2(
+        process.env.YOUTUBE_CLIENT_ID,
+        process.env.YOUTUBE_CLIENT_SECRET,
+        `${process.env.APP_URL}/oauth2callback`
+      );
+      profileOauth.setCredentials(profileTokens);
+
       const youtubeApi = google.youtube('v3');
 
       // Huidige video ophalen
       const current = await youtubeApi.videos.list({
-        auth: oauth2Client,
+        auth: profileOauth,
         part: ['snippet'],
         id: [meta.youtubeVideoId],
       });
@@ -886,7 +949,7 @@ ${inputJson}`;
       const updatedDescription = (snippet.description || "").replace("[link]", spotifyUrl);
 
       await youtubeApi.videos.update({
-        auth: oauth2Client,
+        auth: profileOauth,
         part: ['snippet'],
         requestBody: {
           id: meta.youtubeVideoId,
