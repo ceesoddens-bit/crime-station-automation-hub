@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { cn } from './lib/utils';
-import { 
-  Play, 
-  RotateCcw, 
-  CheckCircle2, 
-  Clock, 
-  AlertCircle, 
+import {
+  Play,
+  RotateCcw,
+  CheckCircle2,
+  Clock,
+  AlertCircle,
   ExternalLink,
   ChevronRight,
   FileText,
@@ -18,10 +18,12 @@ import {
   Check,
   Copy,
   Pencil,
-  Globe
+  Globe,
+  Settings
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
+import SettingsPage, { type Profile } from './SettingsPage';
 
 type StepStatus = 'idle' | 'processing' | 'completed' | 'error' | 'waiting';
 
@@ -76,6 +78,17 @@ export default function App() {
   const [stepStartTimes, setStepStartTimes] = useState<Record<number, number>>({});
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [fileSizeMb, setFileSizeMb] = useState<number | null>(null);
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [selectedProfileId, setSelectedProfileId] = useState<string>('');
+  const [publishToYoutube, setPublishToYoutube] = useState(true);
+  const [publishToSpotify, setPublishToSpotify] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [modalProfileId, setModalProfileId] = useState<string>('');
+  const [modalPublishYoutube, setModalPublishYoutube] = useState(true);
+  const [modalPublishSpotify, setModalPublishSpotify] = useState(false);
+  const [modalSpotifyUrl, setModalSpotifyUrl] = useState('');
+  const [modalYoutubeLinked, setModalYoutubeLinked] = useState(false);
+  const [modalPolling, setModalPolling] = useState(false);
 
   // Load state from localStorage on mount
   useEffect(() => {
@@ -120,6 +133,27 @@ export default function App() {
       .catch(() => setAuthStatus('loggedOut'));
   }, []);
 
+  useEffect(() => {
+    if (authStatus === 'loggedIn') {
+      axios.get('/api/profiles').then(res => {
+        setProfiles(res.data);
+        if (res.data.length > 0 && !selectedProfileId) {
+          setSelectedProfileId(res.data[0].id);
+          setPublishToYoutube(res.data[0].publishYoutube);
+          setPublishToSpotify(res.data[0].publishSpotify);
+        }
+      }).catch(() => {});
+    }
+  }, [authStatus]);
+
+  useEffect(() => {
+    const profile = profiles.find(p => p.id === selectedProfileId);
+    if (profile) {
+      setPublishToYoutube(profile.publishYoutube);
+      setPublishToSpotify(profile.publishSpotify);
+    }
+  }, [selectedProfileId]);
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
@@ -136,16 +170,41 @@ export default function App() {
     setAuthStatus('loggedOut');
   };
 
+  // Initialiseer modal-state wanneer de publish modal opent
   useEffect(() => {
-    const checkAuthStatus = () => {
-      axios.get('/api/auth/youtube/status')
-        .then(res => setIsYoutubeLinked(!!res.data?.linked))
-        .catch(e => console.error("Could not check youtube auth status", e));
-    };
-    checkAuthStatus();
-    window.addEventListener('focus', checkAuthStatus);
-    return () => window.removeEventListener('focus', checkAuthStatus);
-  }, []);
+    if (!showPublishConfirm) return;
+    const profileId = selectedProfileId || 'default';
+    setModalProfileId(profileId);
+    const profile = profiles.find(p => p.id === profileId);
+    setModalPublishYoutube(profile ? profile.publishYoutube : true);
+    setModalPublishSpotify(profile ? profile.publishSpotify : false);
+    setModalSpotifyUrl(profile?.spotifyUrl || spotifyShowUrl || '');
+    // Check YouTube status
+    axios.get(`/api/auth/youtube/status?profileId=${profileId}`)
+      .then(r => setModalYoutubeLinked(!!r.data?.linked))
+      .catch(() => setModalYoutubeLinked(false));
+  }, [showPublishConfirm]);
+
+  // Poll YouTube status wanneer gebruiker bezig is met inloggen
+  useEffect(() => {
+    if (!modalPolling || !showPublishConfirm) return;
+    const interval = setInterval(() => {
+      axios.get(`/api/auth/youtube/status?profileId=${modalProfileId}`)
+        .then(r => {
+          if (r.data?.linked) {
+            setModalYoutubeLinked(true);
+            setModalPolling(false);
+          }
+        }).catch(() => {});
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [modalPolling, showPublishConfirm, modalProfileId]);
+
+  // YouTube linked wordt afgeleid van het geselecteerde profiel
+  const selectedProfile = profiles.find(p => p.id === selectedProfileId) ?? null;
+  useEffect(() => {
+    setIsYoutubeLinked(!!selectedProfile?.youtubeLinked);
+  }, [selectedProfile]);
 
   useEffect(() => {
     if (guest.trim()) {
@@ -243,9 +302,9 @@ export default function App() {
       } else if (videoSource === 'drive') {
         formData.append('driveUrl', driveUrl);
       }
-      formData.append('series', series);
-      formData.append('host1', host1);
-      formData.append('host2', host2);
+      formData.append('series', series === '__custom__' ? customSeries : series);
+      formData.append('host1', host1 === '__custom__' ? customHost1 : host1);
+      formData.append('host2', host2 === '__custom__' ? customHost2 : host2);
       formData.append('guest', guest);
       formData.append('episodeNumber', episodeNumber);
 
@@ -313,9 +372,10 @@ export default function App() {
         console.warn("Kon bewerkte tekst niet parsen, server gebruikt opgeslagen versie");
       }
 
+      payload.profileId = modalProfileId || selectedProfileId || 'default';
       const response = await axios.post('/api/publish/youtube', payload);
       const data = response.data;
-      
+
       if (data.status === 'completed') {
         updateStepStatus(4, 'completed');
         const links = (data?.links ?? {}) as PublishLinks;
@@ -323,10 +383,11 @@ export default function App() {
         const spotifyUrl = typeof links.spotify === 'string' ? links.spotify : undefined;
         setPublishLinks({ youtube: youtubeUrl, spotify: spotifyUrl });
 
-        // Vul [link] in de YouTube beschrijving met de Spotify URL (per-aflevering of show-URL als fallback)
-        const resolvedSpotifyUrl = spotifyUrl || spotifyShowUrl || null;
+        // Vul [link] in de YouTube beschrijving met de Spotify URL
+        const resolvedSpotifyUrl = spotifyUrl || modalSpotifyUrl || selectedProfile?.spotifyUrl || spotifyShowUrl || null;
+        const usedProfileId = modalProfileId || selectedProfileId || 'default';
         if (youtubeUrl && resolvedSpotifyUrl) {
-          axios.post('/api/publish/update-spotify-link', { requestId: currentRequestId, spotifyUrl: resolvedSpotifyUrl })
+          axios.post('/api/publish/update-spotify-link', { requestId: currentRequestId, spotifyUrl: resolvedSpotifyUrl, profileId: usedProfileId })
             .catch(e => console.warn("Spotify link update mislukt:", e));
         }
         setStepData(prev => ({
@@ -523,6 +584,16 @@ export default function App() {
     );
   }
 
+  if (showSettings) {
+    return (
+      <SettingsPage
+        profiles={profiles}
+        onClose={() => { setShowSettings(false); axios.get('/api/profiles').then(r => setProfiles(r.data)); }}
+        onProfilesChange={setProfiles}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white font-sans selection:bg-orange-500/30">
       {/* Background Atmosphere */}
@@ -539,12 +610,20 @@ export default function App() {
               <div className="w-10 h-10 bg-orange-600 rounded flex items-center justify-center font-bold text-xl">CS</div>
               <h1 className="text-sm font-mono tracking-widest uppercase opacity-50">Crime Station Automation</h1>
             </div>
-            <button
-              onClick={handleLogout}
-              className="text-xs font-mono uppercase tracking-widest text-gray-500 hover:text-white border border-white/10 hover:border-white/30 px-3 py-1.5 rounded transition-colors"
-            >
-              Uitloggen
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowSettings(true)}
+                className="text-xs font-mono uppercase tracking-widest text-gray-500 hover:text-white border border-white/10 hover:border-white/30 px-3 py-1.5 rounded transition-colors flex items-center gap-2"
+              >
+                <Settings className="w-3.5 h-3.5" /> Instellingen
+              </button>
+              <button
+                onClick={handleLogout}
+                className="text-xs font-mono uppercase tracking-widest text-gray-500 hover:text-white border border-white/10 hover:border-white/30 px-3 py-1.5 rounded transition-colors"
+              >
+                Uitloggen
+              </button>
+            </div>
           </div>
           <h2 className="text-5xl md:text-7xl font-bold tracking-tighter leading-none mb-6">
             CONTENT <span className="text-orange-600">HUB</span>
@@ -552,99 +631,7 @@ export default function App() {
           <p className="text-gray-400 max-w-xl text-lg">
             Autonome verwerking van video naar podcast en SEO-geoptimaliseerde content.
           </p>
-          <div className="mt-4 flex flex-wrap gap-3">
-            {/* YouTube */}
-            {isYoutubeLinked ? (
-              <div className="text-xs font-mono uppercase bg-green-600/20 text-green-500 border border-green-500/30 px-3 py-1.5 rounded flex items-center gap-2">
-                <Check className="w-3 h-3" /> YouTube Gekoppeld
-              </div>
-            ) : (
-              <a href="/api/auth/youtube" target="_blank" rel="noopener noreferrer" className="text-xs font-mono uppercase bg-red-600/20 text-red-500 border border-red-500/30 px-3 py-1.5 rounded flex items-center gap-2 hover:bg-red-600/40 transition-colors">
-                <Youtube className="w-3 h-3" /> Koppel YouTube Account (Eenmalig)
-              </a>
-            )}
-
-            {/* Spotify */}
-            {spotifyShowUrl ? (
-              <button
-                onClick={() => { setSpotifyInput(spotifyShowUrl); setShowSpotifyModal(true); }}
-                className="text-xs font-mono uppercase bg-green-600/20 text-green-500 border border-green-500/30 px-3 py-1.5 rounded flex items-center gap-2 hover:bg-green-600/30 transition-colors"
-              >
-                <Check className="w-3 h-3" /> Spotify Gekoppeld
-              </button>
-            ) : (
-              <button
-                onClick={() => { setSpotifyInput(''); setShowSpotifyModal(true); }}
-                className="text-xs font-mono uppercase bg-red-600/20 text-red-500 border border-red-500/30 px-3 py-1.5 rounded flex items-center gap-2 hover:bg-red-600/40 transition-colors"
-              >
-                <Music className="w-3 h-3" /> Koppel Spotify Podcast (Eenmalig)
-              </button>
-            )}
-          </div>
         </header>
-
-        {/* Spotify modal */}
-        <AnimatePresence>
-          {showSpotifyModal && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
-              onClick={() => setShowSpotifyModal(false)}
-            >
-              <motion.div
-                initial={{ scale: 0.95, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.95, opacity: 0 }}
-                className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-full max-w-md"
-                onClick={e => e.stopPropagation()}
-              >
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="w-8 h-8 bg-green-600 rounded flex items-center justify-center">
-                    <Music className="w-4 h-4 text-white" />
-                  </div>
-                  <h3 className="text-lg font-bold">Spotify Podcast Koppelen</h3>
-                </div>
-                <p className="text-sm text-gray-400 mb-4">
-                  Voer de URL in van je Spotify podcast show. Deze wordt automatisch gebruikt in beschrijvingen en links.
-                </p>
-                <input
-                  type="url"
-                  value={spotifyInput}
-                  onChange={e => setSpotifyInput(e.target.value)}
-                  placeholder="https://open.spotify.com/show/..."
-                  className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-green-500 mb-4"
-                  autoFocus
-                />
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setShowSpotifyModal(false)}
-                    className="flex-1 px-4 py-2.5 text-sm text-gray-400 border border-zinc-700 rounded-lg hover:bg-zinc-800 transition-colors"
-                  >
-                    Annuleren
-                  </button>
-                  <button
-                    onClick={() => {
-                      const url = spotifyInput.trim();
-                      if (url) {
-                        setSpotifyShowUrl(url);
-                        localStorage.setItem('crime-station-spotify-url', url);
-                      } else {
-                        setSpotifyShowUrl('');
-                        localStorage.removeItem('crime-station-spotify-url');
-                      }
-                      setShowSpotifyModal(false);
-                    }}
-                    className="flex-1 px-4 py-2.5 text-sm font-semibold bg-green-600 hover:bg-green-500 text-white rounded-lg transition-colors"
-                  >
-                    {spotifyInput.trim() ? 'Opslaan' : 'Ontkoppelen'}
-                  </button>
-                </div>
-              </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
 
         {!isStarted ? (
           <motion.section 
@@ -682,19 +669,19 @@ export default function App() {
                 <div className="space-y-2">
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Serie</label>
                   <select
-                    value={seriesOptions.includes(series) ? series : '__custom__'}
-                    onChange={(e) => { if (e.target.value === '__custom__') { setSeries(''); } else { setSeries(e.target.value); setCustomSeries(''); } }}
+                    value={series === '__custom__' ? '__custom__' : (seriesOptions.includes(series) ? series : 'Crime Insight')}
+                    onChange={(e) => { if (e.target.value === '__custom__') { setSeries('__custom__'); setCustomSeries(''); } else { setSeries(e.target.value); setCustomSeries(''); } }}
                     className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
                   >
                     {seriesOptions.map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
                     <option value="__custom__" className="bg-zinc-900">Anders, namelijk...</option>
                   </select>
-                  {(!seriesOptions.includes(series)) && (
+                  {series === '__custom__' && (
                     <input
                       type="text"
                       placeholder="Vul serie naam in..."
-                      value={series}
-                      onChange={(e) => setSeries(e.target.value)}
+                      value={customSeries}
+                      onChange={(e) => setCustomSeries(e.target.value)}
                       className="w-full bg-white/5 border border-orange-600/50 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors text-sm"
                       autoFocus
                     />
@@ -715,24 +702,23 @@ export default function App() {
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 1</label>
                   {(() => {
                     const hostOptions = ['Mick van Wely', 'Nancy Dekens', 'Aziz Akhath', 'Wickey van der Meijden', 'Arthur Brand', 'Lena Olivier', 'Roy Regterschot'];
-                    const isCustom = host1 !== '' && !hostOptions.includes(host1);
                     return (
                       <>
                         <select
-                          value={isCustom ? '__custom__' : host1}
-                          onChange={(e) => { if (e.target.value === '__custom__') { setHost1(''); } else { setHost1(e.target.value); } }}
+                          value={host1 === '__custom__' ? '__custom__' : (hostOptions.includes(host1) ? host1 : '')}
+                          onChange={(e) => { if (e.target.value === '__custom__') { setHost1('__custom__'); setCustomHost1(''); } else { setHost1(e.target.value); setCustomHost1(''); } }}
                           className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
                         >
                           <option value="" className="bg-zinc-900">— Solo / geen presentator —</option>
                           {hostOptions.map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
                           <option value="__custom__" className="bg-zinc-900">Anders, namelijk...</option>
                         </select>
-                        {isCustom && (
+                        {host1 === '__custom__' && (
                           <input
                             type="text"
                             placeholder="Naam presentator..."
-                            value={host1}
-                            onChange={(e) => setHost1(e.target.value)}
+                            value={customHost1}
+                            onChange={(e) => setCustomHost1(e.target.value)}
                             className="w-full bg-white/5 border border-orange-600/50 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors text-sm"
                             autoFocus
                           />
@@ -745,24 +731,23 @@ export default function App() {
                   <label className="text-xs font-mono uppercase tracking-widest opacity-50">Presentator 2</label>
                   {(() => {
                     const hostOptions = ['Mick van Wely', 'Nancy Dekens', 'Aziz Akhath', 'Wickey van der Meijden', 'Arthur Brand', 'Lena Olivier', 'Roy Regterschot'];
-                    const isCustom = host2 !== '' && !hostOptions.includes(host2);
                     return (
                       <>
                         <select
-                          value={isCustom ? '__custom__' : host2}
-                          onChange={(e) => { if (e.target.value === '__custom__') { setHost2(''); } else { setHost2(e.target.value); } }}
+                          value={host2 === '__custom__' ? '__custom__' : (hostOptions.includes(host2) ? host2 : '')}
+                          onChange={(e) => { if (e.target.value === '__custom__') { setHost2('__custom__'); setCustomHost2(''); } else { setHost2(e.target.value); setCustomHost2(''); } }}
                           className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-4 focus:outline-none focus:border-orange-600 transition-colors appearance-none"
                         >
                           <option value="" className="bg-zinc-900">Geen / Leeg laten</option>
                           {hostOptions.map(opt => <option key={opt} value={opt} className="bg-zinc-900">{opt}</option>)}
                           <option value="__custom__" className="bg-zinc-900">Anders, namelijk...</option>
                         </select>
-                        {isCustom && (
+                        {host2 === '__custom__' && (
                           <input
                             type="text"
                             placeholder="Naam presentator..."
-                            value={host2}
-                            onChange={(e) => setHost2(e.target.value)}
+                            value={customHost2}
+                            onChange={(e) => setCustomHost2(e.target.value)}
                             className="w-full bg-white/5 border border-orange-600/50 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors text-sm"
                             autoFocus
                           />
@@ -801,17 +786,76 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Profiel & platform selectie */}
+              <div className="space-y-4 bg-white/5 border border-white/10 rounded-xl p-4">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-mono uppercase tracking-widest opacity-50">Kanaal / Profiel</label>
+                    <button
+                      type="button"
+                      onClick={() => setShowSettings(true)}
+                      className="text-xs text-orange-500 hover:text-orange-400 transition-colors font-mono"
+                    >
+                      + Beheer profielen
+                    </button>
+                  </div>
+                  <select
+                    value={selectedProfileId}
+                    onChange={e => setSelectedProfileId(e.target.value)}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors appearance-none text-sm"
+                  >
+                    <option value="" className="bg-zinc-900">— Geen profiel —</option>
+                    {profiles.map(p => (
+                      <option key={p.id} value={p.id} className="bg-zinc-900">{p.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Publiceren naar</label>
+                  <div className="flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setPublishToYoutube(v => !v)}
+                      className={cn(
+                        "flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg border font-bold text-sm transition-all",
+                        publishToYoutube ? "bg-orange-600/20 border-orange-600/50 text-orange-400" : "bg-white/5 border-white/10 text-gray-500"
+                      )}
+                    >
+                      <Youtube className="w-4 h-4" /> YouTube
+                      {publishToYoutube && <Check className="w-3 h-3" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPublishToSpotify(v => !v)}
+                      className={cn(
+                        "flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg border font-bold text-sm transition-all",
+                        publishToSpotify ? "bg-green-600/20 border-green-600/50 text-green-400" : "bg-white/5 border-white/10 text-gray-500"
+                      )}
+                    >
+                      <Music className="w-4 h-4" /> Spotify
+                      {publishToSpotify && <Check className="w-3 h-3" />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               <div className="space-y-2">
                 <button
                   onClick={handleStart}
-                  disabled={!localFile || !isYoutubeLinked}
+                  disabled={!localFile}
                   className="w-full bg-orange-600 hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-5 rounded-lg transition-all flex items-center justify-center gap-3 text-xl uppercase tracking-tighter"
                 >
                   Start Verwerking <Play className="w-6 h-6 fill-current" />
                 </button>
-                {!isYoutubeLinked && (
+                {!selectedProfileId && (
+                  <p className="text-xs text-gray-500 text-center flex items-center justify-center gap-1">
+                    Zonder profiel kan je alleen transcriberen — publiceren is niet mogelijk
+                  </p>
+                )}
+                {selectedProfileId && publishToYoutube && !isYoutubeLinked && (
                   <p className="text-xs text-red-400 text-center flex items-center justify-center gap-1">
-                    <AlertCircle className="w-3 h-3" /> Koppel eerst je YouTube account via de knop bovenaan
+                    <AlertCircle className="w-3 h-3" /> Koppel het YouTube-account voor dit profiel via Instellingen
                   </p>
                 )}
               </div>
@@ -1322,34 +1366,107 @@ export default function App() {
                   </motion.div>
                 )}
 
-                {/* Bevestigingsdialog publiceren */}
+                {/* Publiceer modal */}
                 {showPublishConfirm && (
-                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
                     <motion.div
                       initial={{ opacity: 0, scale: 0.95 }}
                       animate={{ opacity: 1, scale: 1 }}
-                      className="bg-zinc-900 border border-white/10 rounded-2xl p-8 max-w-md w-full mx-4 shadow-2xl"
+                      className="bg-zinc-900 border border-white/10 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5"
                     >
-                      <div className="flex items-center gap-3 mb-4">
-                        <div className="w-10 h-10 bg-orange-600/20 rounded-xl flex items-center justify-center">
-                          <Youtube className="w-5 h-5 text-orange-500" />
+                      <h3 className="text-xl font-bold">Publiceren</h3>
+
+                      {/* Profielkeuze */}
+                      <div className="space-y-2">
+                        <label className="text-xs font-mono uppercase tracking-widest opacity-50">Kanaal / Profiel</label>
+                        <div className="flex gap-2">
+                          <select
+                            value={modalProfileId}
+                            onChange={e => {
+                              const pid = e.target.value;
+                              setModalProfileId(pid);
+                              const p = profiles.find(x => x.id === pid);
+                              if (p) { setModalPublishYoutube(p.publishYoutube); setModalPublishSpotify(p.publishSpotify); setModalSpotifyUrl(p.spotifyUrl || ''); }
+                              axios.get(`/api/auth/youtube/status?profileId=${pid || 'default'}`).then(r => setModalYoutubeLinked(!!r.data?.linked)).catch(() => {});
+                            }}
+                            className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-orange-600 transition-colors appearance-none"
+                          >
+                            <option value="" className="bg-zinc-900">— Geen profiel —</option>
+                            {profiles.map(p => <option key={p.id} value={p.id} className="bg-zinc-900">{p.name}</option>)}
+                          </select>
+                          <button onClick={() => { setShowPublishConfirm(false); setShowSettings(true); }} className="text-xs text-orange-500 hover:text-orange-400 border border-white/10 px-3 py-2 rounded-lg transition-colors whitespace-nowrap">+ Nieuw profiel</button>
                         </div>
-                        <h3 className="text-xl font-bold">Publiceren naar YouTube</h3>
                       </div>
-                      <p className="text-gray-400 mb-2 text-sm">De video wordt gepubliceerd met de gegenereerde titel, beschrijving en tags. De video verschijnt als <strong className="text-white">privé</strong> op YouTube.</p>
-                      <p className="text-gray-500 text-sm mb-6">Wil je de tekst eerst aanpassen? Klik op <span className="text-white font-medium">← Terug, tekst bewerken</span>.</p>
-                      <div className="flex gap-3">
-                        <button
-                          onClick={() => setShowPublishConfirm(false)}
-                          className="flex-1 border border-white/10 bg-white/5 hover:bg-white/10 text-white px-4 py-2.5 rounded-lg font-bold transition-all flex items-center justify-center gap-2"
-                        >
-                          ← Terug, tekst bewerken
+
+                      {/* Platform keuze */}
+                      <div className="space-y-2">
+                        <label className="text-xs font-mono uppercase tracking-widest opacity-50">Publiceren naar</label>
+                        <div className="flex gap-3">
+                          <button type="button" onClick={() => setModalPublishYoutube(v => !v)}
+                            className={cn("flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg border font-bold text-sm transition-all",
+                              modalPublishYoutube ? "bg-orange-600/20 border-orange-600/50 text-orange-400" : "bg-white/5 border-white/10 text-gray-500")}>
+                            <Youtube className="w-4 h-4" /> YouTube {modalPublishYoutube && <Check className="w-3 h-3" />}
+                          </button>
+                          <button type="button" onClick={() => setModalPublishSpotify(v => !v)}
+                            className={cn("flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg border font-bold text-sm transition-all",
+                              modalPublishSpotify ? "bg-green-600/20 border-green-600/50 text-green-400" : "bg-white/5 border-white/10 text-gray-500")}>
+                            <Music className="w-4 h-4" /> Spotify {modalPublishSpotify && <Check className="w-3 h-3" />}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* YouTube login status */}
+                      {modalPublishYoutube && (
+                        <div className="bg-black/30 border border-white/10 rounded-xl p-4 space-y-2">
+                          <p className="text-xs font-mono uppercase tracking-widest opacity-50">YouTube Account</p>
+                          {modalYoutubeLinked ? (
+                            <div className="flex items-center gap-2 text-green-400 text-sm font-bold">
+                              <Check className="w-4 h-4" /> Gekoppeld en klaar om te uploaden
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              <p className="text-sm text-gray-400">Nog niet ingelogd op YouTube.</p>
+                              <a
+                                href={`/api/auth/youtube?profileId=${modalProfileId || 'default'}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={() => setModalPolling(true)}
+                                className="inline-flex items-center gap-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/30 px-4 py-2 rounded-lg text-sm font-bold transition-colors"
+                              >
+                                <Youtube className="w-4 h-4" /> Inloggen op YouTube
+                                {modalPolling && <Loader2 className="w-3 h-3 animate-spin" />}
+                              </a>
+                              {modalPolling && <p className="text-xs text-gray-500">Wachten op koppeling...</p>}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Spotify URL */}
+                      {modalPublishSpotify && (
+                        <div className="space-y-2">
+                          <label className="text-xs font-mono uppercase tracking-widest opacity-50">Spotify Show URL</label>
+                          <input
+                            type="url"
+                            value={modalSpotifyUrl}
+                            onChange={e => setModalSpotifyUrl(e.target.value)}
+                            placeholder="https://open.spotify.com/show/..."
+                            className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-green-500 transition-colors"
+                          />
+                        </div>
+                      )}
+
+                      <div className="flex gap-3 pt-1">
+                        <button onClick={() => { setShowPublishConfirm(false); setModalPolling(false); }}
+                          className="flex-1 border border-white/10 bg-white/5 hover:bg-white/10 text-white px-4 py-2.5 rounded-lg font-bold transition-all">
+                          ← Terug
                         </button>
                         <button
-                          onClick={() => { setShowPublishConfirm(false); handleApprove(); }}
-                          className="flex-1 bg-orange-600 hover:bg-orange-500 text-white px-4 py-2.5 rounded-lg font-bold transition-all flex items-center justify-center gap-2"
+                          onClick={() => { setShowPublishConfirm(false); setModalPolling(false); handleApprove(); }}
+                          disabled={modalPublishYoutube && !modalYoutubeLinked}
+                          className="flex-1 bg-orange-600 hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-lg font-bold transition-all flex items-center justify-center gap-2"
                         >
-                          <Youtube className="w-4 h-4" /> Ja, publiceren
+                          <Play className="w-4 h-4 fill-current" /> Publiceren
                         </button>
                       </div>
                     </motion.div>
