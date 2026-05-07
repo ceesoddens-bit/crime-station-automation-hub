@@ -83,6 +83,12 @@ export default function App() {
   const [publishToYoutube, setPublishToYoutube] = useState(true);
   const [publishToSpotify, setPublishToSpotify] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [modalProfileId, setModalProfileId] = useState<string>('');
+  const [modalPublishYoutube, setModalPublishYoutube] = useState(true);
+  const [modalPublishSpotify, setModalPublishSpotify] = useState(false);
+  const [modalSpotifyUrl, setModalSpotifyUrl] = useState('');
+  const [modalYoutubeLinked, setModalYoutubeLinked] = useState(false);
+  const [modalPolling, setModalPolling] = useState(false);
 
   // Load state from localStorage on mount
   useEffect(() => {
@@ -163,6 +169,36 @@ export default function App() {
     await axios.post('/api/auth/logout');
     setAuthStatus('loggedOut');
   };
+
+  // Initialiseer modal-state wanneer de publish modal opent
+  useEffect(() => {
+    if (!showPublishConfirm) return;
+    const profileId = selectedProfileId || 'default';
+    setModalProfileId(profileId);
+    const profile = profiles.find(p => p.id === profileId);
+    setModalPublishYoutube(profile ? profile.publishYoutube : true);
+    setModalPublishSpotify(profile ? profile.publishSpotify : false);
+    setModalSpotifyUrl(profile?.spotifyUrl || spotifyShowUrl || '');
+    // Check YouTube status
+    axios.get(`/api/auth/youtube/status?profileId=${profileId}`)
+      .then(r => setModalYoutubeLinked(!!r.data?.linked))
+      .catch(() => setModalYoutubeLinked(false));
+  }, [showPublishConfirm]);
+
+  // Poll YouTube status wanneer gebruiker bezig is met inloggen
+  useEffect(() => {
+    if (!modalPolling || !showPublishConfirm) return;
+    const interval = setInterval(() => {
+      axios.get(`/api/auth/youtube/status?profileId=${modalProfileId}`)
+        .then(r => {
+          if (r.data?.linked) {
+            setModalYoutubeLinked(true);
+            setModalPolling(false);
+          }
+        }).catch(() => {});
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [modalPolling, showPublishConfirm, modalProfileId]);
 
   // YouTube linked wordt afgeleid van het geselecteerde profiel
   const selectedProfile = profiles.find(p => p.id === selectedProfileId) ?? null;
@@ -336,7 +372,7 @@ export default function App() {
         console.warn("Kon bewerkte tekst niet parsen, server gebruikt opgeslagen versie");
       }
 
-      payload.profileId = selectedProfileId;
+      payload.profileId = modalProfileId || selectedProfileId || 'default';
       const response = await axios.post('/api/publish/youtube', payload);
       const data = response.data;
 
@@ -347,10 +383,11 @@ export default function App() {
         const spotifyUrl = typeof links.spotify === 'string' ? links.spotify : undefined;
         setPublishLinks({ youtube: youtubeUrl, spotify: spotifyUrl });
 
-        // Vul [link] in de YouTube beschrijving met de Spotify URL van het profiel
-        const resolvedSpotifyUrl = spotifyUrl || selectedProfile?.spotifyUrl || spotifyShowUrl || null;
+        // Vul [link] in de YouTube beschrijving met de Spotify URL
+        const resolvedSpotifyUrl = spotifyUrl || modalSpotifyUrl || selectedProfile?.spotifyUrl || spotifyShowUrl || null;
+        const usedProfileId = modalProfileId || selectedProfileId || 'default';
         if (youtubeUrl && resolvedSpotifyUrl) {
-          axios.post('/api/publish/update-spotify-link', { requestId: currentRequestId, spotifyUrl: resolvedSpotifyUrl, profileId: selectedProfileId })
+          axios.post('/api/publish/update-spotify-link', { requestId: currentRequestId, spotifyUrl: resolvedSpotifyUrl, profileId: usedProfileId })
             .catch(e => console.warn("Spotify link update mislukt:", e));
         }
         setStepData(prev => ({
@@ -752,19 +789,25 @@ export default function App() {
               {/* Profiel & platform selectie */}
               <div className="space-y-4 bg-white/5 border border-white/10 rounded-xl p-4">
                 <div className="space-y-2">
-                  <label className="text-xs font-mono uppercase tracking-widest opacity-50">Kanaal / Profiel</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-mono uppercase tracking-widest opacity-50">Kanaal / Profiel</label>
+                    <button
+                      type="button"
+                      onClick={() => setShowSettings(true)}
+                      className="text-xs text-orange-500 hover:text-orange-400 transition-colors font-mono"
+                    >
+                      + Beheer profielen
+                    </button>
+                  </div>
                   <select
                     value={selectedProfileId}
                     onChange={e => setSelectedProfileId(e.target.value)}
                     className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 focus:outline-none focus:border-orange-600 transition-colors appearance-none text-sm"
                   >
-                    <option value="" className="bg-zinc-900">— Geen profiel (alleen transcriptie) —</option>
+                    <option value="" className="bg-zinc-900">— Geen profiel —</option>
                     {profiles.map(p => (
                       <option key={p.id} value={p.id} className="bg-zinc-900">{p.name}</option>
                     ))}
-                    {profiles.length === 0 && (
-                      <option disabled className="bg-zinc-900 text-gray-500">Nog geen profielen — maak aan via Instellingen</option>
-                    )}
                   </select>
                 </div>
 
@@ -970,30 +1013,12 @@ export default function App() {
                               >
                                 <Pencil className="w-4 h-4" /> Tekst bewerken
                               </button>
-                              {selectedProfileId ? (
-                                <button
-                                  onClick={() => setShowPublishConfirm(true)}
-                                  className="bg-orange-600 hover:bg-orange-500 text-white px-5 py-2 rounded-lg font-bold transition-all flex items-center gap-2"
-                                >
-                                  <Youtube className="w-4 h-4" /> Publiceren <ChevronRight className="w-4 h-4" />
-                                </button>
-                              ) : (
-                                <div className="flex items-center gap-2">
-                                  <select
-                                    value=""
-                                    onChange={e => { if (e.target.value) setSelectedProfileId(e.target.value); }}
-                                    className="bg-white/5 border border-orange-600/50 text-orange-400 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:border-orange-600 transition-colors appearance-none"
-                                  >
-                                    <option value="" className="bg-zinc-900 text-gray-400">Kies profiel...</option>
-                                    {profiles.map(p => (
-                                      <option key={p.id} value={p.id} className="bg-zinc-900 text-white">{p.name}</option>
-                                    ))}
-                                    {profiles.length === 0 && (
-                                      <option disabled className="bg-zinc-900 text-gray-500">Geen profielen — maak aan via Instellingen</option>
-                                    )}
-                                  </select>
-                                </div>
-                              )}
+                              <button
+                                onClick={() => setShowPublishConfirm(true)}
+                                className="bg-orange-600 hover:bg-orange-500 text-white px-5 py-2 rounded-lg font-bold transition-all flex items-center gap-2"
+                              >
+                                <Youtube className="w-4 h-4" /> Publiceren <ChevronRight className="w-4 h-4" />
+                              </button>
                             </>
                           )
                         )}
@@ -1341,34 +1366,107 @@ export default function App() {
                   </motion.div>
                 )}
 
-                {/* Bevestigingsdialog publiceren */}
+                {/* Publiceer modal */}
                 {showPublishConfirm && (
-                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
                     <motion.div
                       initial={{ opacity: 0, scale: 0.95 }}
                       animate={{ opacity: 1, scale: 1 }}
-                      className="bg-zinc-900 border border-white/10 rounded-2xl p-8 max-w-md w-full mx-4 shadow-2xl"
+                      className="bg-zinc-900 border border-white/10 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5"
                     >
-                      <div className="flex items-center gap-3 mb-4">
-                        <div className="w-10 h-10 bg-orange-600/20 rounded-xl flex items-center justify-center">
-                          <Youtube className="w-5 h-5 text-orange-500" />
+                      <h3 className="text-xl font-bold">Publiceren</h3>
+
+                      {/* Profielkeuze */}
+                      <div className="space-y-2">
+                        <label className="text-xs font-mono uppercase tracking-widest opacity-50">Kanaal / Profiel</label>
+                        <div className="flex gap-2">
+                          <select
+                            value={modalProfileId}
+                            onChange={e => {
+                              const pid = e.target.value;
+                              setModalProfileId(pid);
+                              const p = profiles.find(x => x.id === pid);
+                              if (p) { setModalPublishYoutube(p.publishYoutube); setModalPublishSpotify(p.publishSpotify); setModalSpotifyUrl(p.spotifyUrl || ''); }
+                              axios.get(`/api/auth/youtube/status?profileId=${pid || 'default'}`).then(r => setModalYoutubeLinked(!!r.data?.linked)).catch(() => {});
+                            }}
+                            className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-orange-600 transition-colors appearance-none"
+                          >
+                            <option value="" className="bg-zinc-900">— Geen profiel —</option>
+                            {profiles.map(p => <option key={p.id} value={p.id} className="bg-zinc-900">{p.name}</option>)}
+                          </select>
+                          <button onClick={() => { setShowPublishConfirm(false); setShowSettings(true); }} className="text-xs text-orange-500 hover:text-orange-400 border border-white/10 px-3 py-2 rounded-lg transition-colors whitespace-nowrap">+ Nieuw profiel</button>
                         </div>
-                        <h3 className="text-xl font-bold">Publiceren naar YouTube</h3>
                       </div>
-                      <p className="text-gray-400 mb-2 text-sm">De video wordt gepubliceerd met de gegenereerde titel, beschrijving en tags. De video verschijnt als <strong className="text-white">privé</strong> op YouTube.</p>
-                      <p className="text-gray-500 text-sm mb-6">Wil je de tekst eerst aanpassen? Klik op <span className="text-white font-medium">← Terug, tekst bewerken</span>.</p>
-                      <div className="flex gap-3">
-                        <button
-                          onClick={() => setShowPublishConfirm(false)}
-                          className="flex-1 border border-white/10 bg-white/5 hover:bg-white/10 text-white px-4 py-2.5 rounded-lg font-bold transition-all flex items-center justify-center gap-2"
-                        >
-                          ← Terug, tekst bewerken
+
+                      {/* Platform keuze */}
+                      <div className="space-y-2">
+                        <label className="text-xs font-mono uppercase tracking-widest opacity-50">Publiceren naar</label>
+                        <div className="flex gap-3">
+                          <button type="button" onClick={() => setModalPublishYoutube(v => !v)}
+                            className={cn("flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg border font-bold text-sm transition-all",
+                              modalPublishYoutube ? "bg-orange-600/20 border-orange-600/50 text-orange-400" : "bg-white/5 border-white/10 text-gray-500")}>
+                            <Youtube className="w-4 h-4" /> YouTube {modalPublishYoutube && <Check className="w-3 h-3" />}
+                          </button>
+                          <button type="button" onClick={() => setModalPublishSpotify(v => !v)}
+                            className={cn("flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg border font-bold text-sm transition-all",
+                              modalPublishSpotify ? "bg-green-600/20 border-green-600/50 text-green-400" : "bg-white/5 border-white/10 text-gray-500")}>
+                            <Music className="w-4 h-4" /> Spotify {modalPublishSpotify && <Check className="w-3 h-3" />}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* YouTube login status */}
+                      {modalPublishYoutube && (
+                        <div className="bg-black/30 border border-white/10 rounded-xl p-4 space-y-2">
+                          <p className="text-xs font-mono uppercase tracking-widest opacity-50">YouTube Account</p>
+                          {modalYoutubeLinked ? (
+                            <div className="flex items-center gap-2 text-green-400 text-sm font-bold">
+                              <Check className="w-4 h-4" /> Gekoppeld en klaar om te uploaden
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              <p className="text-sm text-gray-400">Nog niet ingelogd op YouTube.</p>
+                              <a
+                                href={`/api/auth/youtube?profileId=${modalProfileId || 'default'}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={() => setModalPolling(true)}
+                                className="inline-flex items-center gap-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/30 px-4 py-2 rounded-lg text-sm font-bold transition-colors"
+                              >
+                                <Youtube className="w-4 h-4" /> Inloggen op YouTube
+                                {modalPolling && <Loader2 className="w-3 h-3 animate-spin" />}
+                              </a>
+                              {modalPolling && <p className="text-xs text-gray-500">Wachten op koppeling...</p>}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Spotify URL */}
+                      {modalPublishSpotify && (
+                        <div className="space-y-2">
+                          <label className="text-xs font-mono uppercase tracking-widest opacity-50">Spotify Show URL</label>
+                          <input
+                            type="url"
+                            value={modalSpotifyUrl}
+                            onChange={e => setModalSpotifyUrl(e.target.value)}
+                            placeholder="https://open.spotify.com/show/..."
+                            className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-green-500 transition-colors"
+                          />
+                        </div>
+                      )}
+
+                      <div className="flex gap-3 pt-1">
+                        <button onClick={() => { setShowPublishConfirm(false); setModalPolling(false); }}
+                          className="flex-1 border border-white/10 bg-white/5 hover:bg-white/10 text-white px-4 py-2.5 rounded-lg font-bold transition-all">
+                          ← Terug
                         </button>
                         <button
-                          onClick={() => { setShowPublishConfirm(false); handleApprove(); }}
-                          className="flex-1 bg-orange-600 hover:bg-orange-500 text-white px-4 py-2.5 rounded-lg font-bold transition-all flex items-center justify-center gap-2"
+                          onClick={() => { setShowPublishConfirm(false); setModalPolling(false); handleApprove(); }}
+                          disabled={modalPublishYoutube && !modalYoutubeLinked}
+                          className="flex-1 bg-orange-600 hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-lg font-bold transition-all flex items-center justify-center gap-2"
                         >
-                          <Youtube className="w-4 h-4" /> Ja, publiceren
+                          <Play className="w-4 h-4 fill-current" /> Publiceren
                         </button>
                       </div>
                     </motion.div>
